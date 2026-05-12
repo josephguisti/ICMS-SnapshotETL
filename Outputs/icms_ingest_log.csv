@@ -1,2 +1,0 @@
-run_timestamp,snapshot_date,source_file_name,sheet_name,input_row_count,current_dashboard_row_count,history_total_row_count_after_update,master_row_count_after_update,new_client_project_rows,returning_client_project_rows,not_present_in_latest_snapshot_count,required_fields_missing_count,optional_fields_missing_count,field_aliases_added_count,duplicate_client_project_count,password_protected_input,run_status,notes
-5/11/2026 9:07,5/1/2026,ICMS Snapshot-DeIdentified Scrambled.xlsx,Participant Level Summary,1087,1087,1087,1087,1087,0,0,0,0,0,0,FALSE,success,

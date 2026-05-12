@@ -5,3 +5,11 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# ETL outputs (never commit generated Tableau / pipeline artifacts)
+Outputs/
+icms_current_dashboard_flatfile.xlsx
+icms_snapshot_history.csv
+icms_client_project_master.xlsx
+icms_ingest_log.csv
+icms_duplicate_client_project_warning.csv
