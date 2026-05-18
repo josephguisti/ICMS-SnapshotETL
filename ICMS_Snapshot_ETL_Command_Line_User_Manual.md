@@ -1,6 +1,6 @@
 # ICMS Snapshot ETL — Command Line User Manual
 
-This manual describes the **command line** version of the ICMS weekly snapshot ETL. It is intended for technical staff who run `update_icms_snapshot_files.py` from a terminal for development, testing, or scheduled batch runs. A future graphical interface will call the same core module; behavior described here applies to the pipeline, not only to the command line entry point.
+This manual describes the **command line** runner (`update_icms_snapshot_files.py`) for the ICMS weekly snapshot ETL. Operational behavior applies to the whole pipeline (`icms_etl_core.py`); for architecture and GUI-specific features, see `architecture planning.md` and run `python icms_gui.py` directly.
 
 ---
 
@@ -9,29 +9,28 @@ This manual describes the **command line** version of the ICMS weekly snapshot E
 The ETL:
 
 1. Opens a weekly DHS/HSH ICMS Excel workbook (`.xlsx`), including optional password protection.
-2. Reads the **Participant Level Summary** sheet (or another sheet you choose).
-3. Cleans headers and text, drops completely blank rows, and keeps only the **approved field set** plus three metadata columns.
-4. Writes or updates Tableau-oriented outputs in a folder you specify.
-5. Maintains a **field alias** file next to the scripts so column renames are remembered across runs.
+2. Reads the **participant** sheet you choose (typically **Participant Level Summary**), detecting the header row automatically when vendors use multi-row headers.
+3. Optionally reads **`Vacant Slots`** and **`Exit Log`** sheets (fixed names in the CLI; sheet names cannot be overridden from the CLI). Missing sheets produce warnings and are treated as empty.
+4. Cleans headers and text, drops completely blank rows, resolves column names via aliases and prompts, and keeps only the **approved field set** plus metadata.
+5. Writes or updates dashboard, history, master, logs, and alias files under your `--output-dir`.
+6. Persists **`field_aliases.json`** beside the scripts and **`settings.json`** after successful runs.
 
-All reusable logic lives in `icms_etl_core.py`. The command line runner is `update_icms_snapshot_files.py`.
+Reusable logic: `icms_etl_core.py`. CLI entry point: `update_icms_snapshot_files.py`.
 
 ---
 
 ## 2. Prerequisites
 
-- **Python 3** (version your organization supports; the tool uses standard library plus third-party packages).
-- **Packages** (install with pip):
+- **Python 3** supported by your organization.
+- **Packages** — install dependencies (recommended):
 
   ```text
-  pip install pandas openpyxl msoffcrypto-tool
+  pip install -r requirements.txt
   ```
 
-  - `pandas` — data frames and CSV I/O.
-  - `openpyxl` — Excel read/write engine used for all `.xlsx` operations.
-  - `msoffcrypto-tool` — decrypt password-protected workbooks **in memory** only. If the file is encrypted and this package is missing, the program exits with an install message.
+  Minimum for the CLI: `pandas`, `openpyxl`, `msoffcrypto-tool`. The GUI adds `tkcalendar` and `keyring`; they are not required for the CLI.
 
-- **Scripts** in the same folder (or on `PYTHONPATH`):
+- **Files** next to each other (or adjust `PYTHONPATH`):
 
   - `icms_etl_core.py`
   - `update_icms_snapshot_files.py`
@@ -40,17 +39,19 @@ All reusable logic lives in `icms_etl_core.py`. The command line runner is `upda
 
 ## 3. How to run (command line)
 
-Open PowerShell, Command Prompt, or a terminal, change to the folder that contains the scripts and your workbook, then run:
+### Single-file mode
 
-```bash
-python update_icms_snapshot_files.py ^
-  --input "ICMS Snapshot-DeIdentified Scrambled.xlsx" ^
-  --snapshot-date 2026-05-01 ^
-  --sheet "Participant Level Summary" ^
+Open PowerShell or a terminal, `cd` to the folder containing the scripts, then run:
+
+```powershell
+python update_icms_snapshot_files.py `
+  --input "ICMS Snapshot-DeIdentified Scrambled.xlsx" `
+  --snapshot-date 2026-05-01 `
+  --sheet "Participant Level Summary" `
   --output-dir "C:\Path\To\Tableau\Data"
 ```
 
-On macOS or Linux, use backslashes for line continuation or put everything on one line:
+On macOS or Linux:
 
 ```bash
 python update_icms_snapshot_files.py \
@@ -60,22 +61,24 @@ python update_icms_snapshot_files.py \
   --output-dir "/path/to/tableau/data"
 ```
 
-If you omit line breaks, a minimal successful command looks like:
+If you omit `--output-dir`, outputs go to the **current working directory**.
+
+### Batch mode (folder of workbooks)
+
+```bash
+python update_icms_snapshot_files.py \
+  --batch "./snapshots" \
+  --output-dir "./output" \
+  --sheet "Participant Level Summary"
+```
+
+In batch mode **`--input` and `--snapshot-date` are ignored**. The CLI lists every `.xlsx` in the batch folder, infers **`MM.DD.YYYY`** dates from filenames, lets you fix any **`UNPARSED`** entries interactively, then processes files **oldest → newest**, continuing past individual file failures where possible.
+
+### Minimal single-file invocation
 
 ```bash
 python update_icms_snapshot_files.py --input "weekly.xlsx" --snapshot-date 2026-05-01
 ```
-
----
-
-## 4. Command line arguments
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--input` | Yes | Path to the weekly ICMS Excel snapshot (`.xlsx`). |
-| `--snapshot-date` | Yes | Snapshot date in **`YYYY-MM-DD`** format. Used in metadata, history grain, and master tracking. |
-| `--sheet` | No | Exact worksheet name. If omitted, the program lists sheet names and **prompts** you to enter a sheet name or its list number. |
-| `--output-dir` | No | Folder where outputs are written. Defaults to the **current working directory** if omitted. |
 
 Built-in help:
 
@@ -85,129 +88,175 @@ python update_icms_snapshot_files.py --help
 
 ---
 
-## 5. Password-protected workbooks
+## 4. Command line arguments
 
-1. The tool first tries to open the file normally.
-2. If the file is encrypted, it prompts for a password using a **hidden** prompt (no echo on screen).
-3. The file is decrypted **in memory** only. No decrypted copy is written to disk, and the password is not stored.
+| Argument | When required | Description |
+|----------|----------------|-------------|
+| `--input` | Single-file mode | Path to one weekly `.xlsx` snapshot. |
+| `--snapshot-date` | Single-file mode | **`YYYY-MM-DD`**. Snapshot date used in metadata, history grain, and master logic. |
+| `--sheet` | No | Participant sheet name. If omitted, sheets are listed and you **prompt** for name or number. In batch mode, if omitted you are prompted once on the first workbook; thereafter the **same name** must exist in later files or that file fails for that workbook. |
+| `--output-dir` | No | Output folder (created if missing). Defaults to **`cwd`** if omitted. |
+| `--batch` | Mutually exclusive with single-file paths | Directory containing multiple `.xlsx` files (see §3). Implies **`--input` / `--snapshot-date` not used**. |
 
-If encryption is detected but `msoffcrypto-tool` is not installed, the program stops and tells you to install it with pip.
-
----
-
-## 6. Sheet selection
-
-- Row **1** is treated as column headers; row **2** onward is data.
-- If `--sheet` is wrong or missing from the workbook, the program prints available sheets and exits with a non-zero status.
-- If `--sheet` is omitted, you interactively choose by **sheet name** or **number** from the printed list.
+Single-file validation: **`--input`** and **`--snapshot-date`** are required unless **`--batch`** is set.
 
 ---
 
-## 7. Field resolution and `field_aliases.json`
+## 5. Saved settings (`settings.json`)
 
-The ETL expects a fixed set of **canonical** column names (required and optional). For each expected field it:
+On startup the CLI reads **`settings.json`** in the script directory (if present) and prints **last used** input directory, output directory, and participant sheet name. After each **successful single-file run** or after **batch completes**, settings are overwritten with:
 
-1. Looks for an **exact** match in the workbook headers (after stripping whitespace from headers).
-2. If not found, checks **`field_aliases.json`** in the **same directory as the Python scripts** (not `--output-dir`). That file maps canonical name → actual column name from a previous run.
-3. If still not found, it **prompts** you to type the workbook column name or press Enter to skip.
+- `last_input_dir` — folder of the workbook (single file) or the batch folder  
+- `last_output_dir`  
+- `last_sheet_name` — resolved participant sheet (`--sheet` value or interactive choice)
 
-**Prompt rules**
-
-- You must type a name that **exactly** matches a workbook column (after the tool’s header stripping).
-- If you supply a valid name, it is used for this run and saved to `field_aliases.json` for future runs.
-- **Required field** skipped (Enter): you see an alert; you must type **`continue`** to proceed without that column. The run continues; missing required fields are noted in the ingest log.
-- **Optional field** skipped (Enter): no extra alert; that column is omitted from outputs for this run.
-
-`field_aliases.json` is created or updated automatically when new mappings are saved.
-
-**Client identifiers and demographics**
-
-`HMIS ID`, `First Name`, and `Last Name` are **required** fields: if they are missing from the workbook headers, the tool prompts for a column mapping, and skipping one after Enter requires typing **`continue`** before the run proceeds without that column (see prompt rules above). `ICMS Slot #` and `Medi-Cal CIN` remain **optional** and can be omitted per run. If a production extract renames any of these headers, map them once via `field_aliases.json` or the interactive prompt.
+This file is advisory for humans; startup does **not** auto-fill CLI arguments beyond the printed reminder.
 
 ---
 
-## 8. Data cleaning (what changes in the data)
+## 6. Snapshot date gap warning (single-file)
 
-- Leading and trailing spaces are removed from **column headers** and from **string** cell values.
-- Rows that are **entirely blank** across data columns are dropped.
-- Other cell values are **not** transformed (dates and numbers stay as interpreted by pandas/openpyxl unless they are strings that get trimmed).
+Before processing, if **`icms_snapshot_history.csv`** already exists under `--output-dir`, the CLI compares your **`--snapshot-date`** to the newest date in history. If the incoming date is **more than 45 days** later, it warns and asks you to type **`confirm`** to proceed or press **Enter** to abort (exit 0).
+
+Batch mode does not run this check per file automatically in the same way; rely on diligence when correcting dates during batch confirmation.
 
 ---
 
-## 9. Output files (written to `--output-dir`)
+## 7. Password-protected workbooks
 
-Use a **stable** output folder path so Tableau connections do not break.
+1. The tool tries normal open first.  
+2. If encrypted, it prompts for a password (**hidden input** where supported).  
+3. Decryption is **in memory** only — no decrypted file on disk, no credential storage.
+
+If encryption is detected but **`msoffcrypto-tool`** is missing, installation instructions are printed and the program exits.
+
+---
+
+## 8. Participant sheet and headers
+
+- The participant sheet contains the tabular census data requiring **field mapping** across runs.
+- The CLI **does not assume row 1 is the header**. It scans the first several rows (**`find_header_row`**) and picks the row that best matches approved canonical field labels, so vendor “title” rows above the column headers no longer force dozens of bogus alias prompts.
+- **`Vacant Slots`** / **`Exit Log`** are read with a **single** header row (first row after openpyxl’s used range). Columns are narrowed in code; unresolved names are not prompted on those sheets.
+
+If `--sheet` is wrong or missing from a workbook, the program lists sheets and exits with a non‑zero status (or skips the file in batch with a logged failure).
+
+---
+
+## 9. Field resolution and `field_aliases.json`
+
+For the **participant** sheet only:
+
+1. **Exact** match after trimming headers.  
+2. **`field_aliases.json`** in the **script directory** (not `--output-dir`), mapping canonical names to workbook columns.  
+3. **Interactive terminal prompt** if still unresolved.
+
+Prompt rules:
+
+- You must supply a workbook column name that **exactly** matches after header stripping (or press Enter).  
+- A valid mapping is saved into **`field_aliases.json`** for later runs.  
+- **Required** field skipped (**Enter**) — you must acknowledge with **`continue`** to proceed without that column; missing required fields appear in ingest notes.  
+- **Optional** fields — skip silently; column omitted from outputs for that run.
+
+The full approved catalogue (required, optional, master tracking fields, exit fields) is summarized in **`architecture planning.md`**. **`Medi-Cal CIN`** and **`ICMS Slot #`** are among the **required** participant fields — do not treat them as optional when verifying prompt behavior.
+
+---
+
+## 10. Data cleaning
+
+- Leading/trailing spaces removed from **headers** and **string** cells.  
+- Rows that are entirely blank across data columns dropped.  
+- Other values are passed through according to spreadsheet types (minimal numeric/date coercion unless already strings that get trimmed).
+
+---
+
+## 11. Output files (written to `--output-dir`)
+
+Use a **stable** output folder so Tableau and downstream jobs keep working.
 
 | File | Description |
 |------|-------------|
-| `icms_current_dashboard_flatfile.xlsx` | **Latest snapshot only.** One row per source row for the run’s snapshot date. Grain for dashboard use: **CHAMP ID + ICMS Project Name** may repeat if the source has duplicates; duplicates are also logged separately. **Overwritten** every run. |
-| `icms_snapshot_history.csv` | **Cumulative history.** Grain: **CHAMP ID + ICMS Project Name + snapshot_date**. If you reload the **same** `snapshot_date`, all rows for that date are **removed** and replaced with the new run’s rows. UTF-8. |
-| `icms_client_project_master.xlsx` | **Cumulative master** per **CHAMP ID + ICMS Project Name**. Includes tracking fields (`first_seen_snapshot_date`, `last_seen_snapshot_date`, `last_seen_source_file`, `present_in_latest_snapshot`, `days_since_last_seen`) plus latest known values for approved fields. Clients not in the latest snapshot remain in the file with `present_in_latest_snapshot` false and recalculated `days_since_last_seen`. |
-| `icms_ingest_log.csv` | One row per **snapshot_date** (same date reruns **replace** the prior log row for that date). UTF-8. |
-| `icms_duplicate_client_project_warning.csv` | Written when duplicate **CHAMP ID + ICMS Project Name** keys appear **within the incoming snapshot**. Same **snapshot_date** reruns **replace** prior warning rows for that date. UTF-8. |
+| `icms_current_dashboard_flatfile.xlsx` | **Participant rows for one snapshot** merged with synthetic **vacant slot** placeholder rows (`is_vacant_slot`). **Participant** rows carry `is_vacant_slot = False`; vacant rows use `True` and null/absent participant fields. **Overwritten** every time a run completes this step successfully. **`--batch` mode** writes the dashboard once per successful file in **old→new order**, so the file normally ends on the **latest snapshot date among successes** — if the last chronological file fails, the dashboard stays at the prior successful snapshot. (**`icms_gui.py`** adds an optional *skip dashboard* flag for historic loads.) |
+| `icms_snapshot_history.csv` | **Participant rows only.** Cumulative CSV; grain **`CHAMP ID + ICMS Project Name + snapshot_date`**. Reruns for the **same** `snapshot_date` replace rows for that date. UTF‑8. |
+| `icms_exit_log_history.csv` | Cumulative exit rows keyed by **`snapshot_date` + `source_file_name`** semantics in core (replacing rows for reruns with the same pairing). Supports rebuilding the master. |
+| `icms_client_project_master.xlsx` | One row per **`CHAMP ID + ICMS Project Name`**. Rebuilt deterministically each run from **snapshot history + exit log history**, so ingest **order within the cumulative files** does not corrupt “latest participant” or status logic. Tracking fields: **`present_in_latest_snapshot`**, **`client_status`** (**`Active`** / **`Exited`** / **`Unknown`**). |
+| `icms_ingest_log.csv` | One row per **`snapshot_date`** run (successful rows updated; failures append with `run_status=failed`). UTF‑8. |
+| `icms_duplicate_client_project_warning.csv` | When duplicate **`CHAMP ID + ICMS Project Name`** pairs appear within one snapshot; same‑date reruns replace prior warnings for that snapshot date. UTF‑8. |
 
-**Script directory (not output folder)**
+**Script directory**
 
 | File | Description |
 |------|-------------|
-| `field_aliases.json` | Persists column alias mappings. Lives next to `icms_etl_core.py` / `update_icms_snapshot_files.py`. |
+| `field_aliases.json` | Column alias mappings. |
+| `settings.json` | Last CLI/GUI dirs and sheet hints (CLI prints on launch). |
+
+**Duplicate-ingest warning UI** (optional check before rerun) exists in **`icms_gui.py`** only — the CLI does not block on “already imported” filename/date pairs.
 
 ---
 
-## 10. Metadata columns added to row outputs
+## 12. Metadata columns added to row outputs
 
-These are prepended to the reduced dataset:
-
-- `snapshot_date` — from `--snapshot-date`
-- `reporting_month` — `YYYY-MM` derived from `snapshot_date`
-- `source_file_name` — base file name of `--input`
+- `snapshot_date` — from **`--snapshot-date`** or batch confirmation  
+- `reporting_month` — `YYYY-MM` from `snapshot_date`  
+- `source_file_name` — base name of workbook  
+- **`is_vacant_slot`** — **`False`** on participant rows written to dashboard; **`True`** on vacant-slot synthetic rows *(dashboard output only)*
 
 ---
 
-## 11. After a successful run
+## 13. Run summary
 
-The command line prints a **run summary**, including:
+After single-file success, the CLI prints totals including:
 
-- Input file name  
-- Selected sheet  
+- Input file  
+- Participant sheet  
 - Snapshot date  
-- Current dashboard row count  
-- Snapshot history row count after update  
-- Master row count after update  
-- Duplicate flag count  
+- Dashboard row counts — **participant + vacant slot injections**  
+- Exit log records read from workbook  
+- History row total after update  
+- Master totals — **`exited`** and **`unknown`** client_status counts  
+- Duplicate flag rows  
 - Missing required fields (if any)  
 - Output folder path  
 
----
-
-## 12. Exit codes and errors
-
-- On **unrecoverable** errors (missing file, bad date format, write failure, decrypt failure, and similar), the program prints a clear message and exits with a **non-zero** status.
-- Some secondary writes (for example duplicate warning or ingest log) may warn without aborting the whole run if the primary outputs already succeeded; read the console output and the log files.
+Batch mode ends with **`BATCH COMPLETE`**: successes, failures, and final master row estimate.
 
 ---
 
-## 13. Suggested workflow for analysts
+## 14. Exit codes and failures
 
-1. Place the new weekly `.xlsx` in a known location.
-2. Choose or create an **output directory** used consistently for Tableau.
-3. Run the command line with `--input`, `--snapshot-date`, and usually `--sheet "Participant Level Summary"`.
-4. Confirm the run summary row counts and open `icms_ingest_log.csv` for the latest `snapshot_date` if you need run metrics or notes.
-5. If DHS renames a column, answer the prompt once; confirm `field_aliases.json` updated next to the scripts.
+- **Recoverable skips** inside batch advance to the next file; failures append to **`icms_ingest_log`** with **`run_status: failed`** when possible (**`_write_failure_log`**).  
+- Hard errors (**bad date**, **missing `--input`** in single mode, decrypt failure before progress, unreadable workbook, etc.) print a message and exit **non‑zero**.
 
 ---
 
-## 14. Quick reference — ingest log columns
+## 15. Suggested workflows
 
-The ingest log row includes (among others): run timestamp, snapshot date, source file, sheet name, input row count, dashboard row count, history total after update, master row count after update, new vs returning client/project counts, not-present count, missing required/optional field counts, aliases added count, duplicate count, whether the input was password protected, run status, and notes.
+### Weekly incremental (single workbook)
+
+1. Place the `.xlsx` in a known path.  
+2. Use one consistent **`--output-dir`**.  
+3. Run **`--input`**, **`--snapshot-date`**, and usually **`--sheet "Participant Level Summary"`**.  
+4. Review stdout summary and **`icms_ingest_log.csv`**.  
+5. If DHS renames participant columns once, approve the prompts; **`field_aliases.json`** records them.
+
+### Historical backfill (many files)
+
+1. Prefer **`--batch`** with **`MM.DD.YYYY`** in filenames, or ingest one file per run while watching order.  
+2. The **master** remains consistent when **`icms_snapshot_history.csv`** and **`icms_exit_log_history.csv`** are complete — order of **historic** ingestion matters only for incremental dashboard freshness, not logical master rebuild.  
+3. **Re-ingesting** past dates updates history replacements for those dates automatically.
 
 ---
 
-## 15. Support and scope
+## 16. Ingest log schema (successful runs)
 
-- **v1 scope:** command line runner plus core ETL only; no bundled GUI or executable in this manual.
-- For behavior details not covered here, refer to inline comments in `icms_etl_core.py` and `update_icms_snapshot_files.py`.
+Representative columns include: **`run_timestamp`**, **`snapshot_date`**, **`source_file_name`**, **`sheet_name`**, **`input_row_count`**, **`vacant_slot_rows_injected`**, **`exit_log_records_processed`**, **`current_dashboard_row_count`**, **`history_total_row_count_after_update`**, **`master_row_count_after_update`**, new/returning/not-present counts, **`master_exited_count`**, **`master_unknown_count`**, missing required/optional counts, alias additions, duplicate count, **`password_protected_input`**, **`run_status`**, **`notes`**. Failures populate the same structure with blanks where metrics are unavailable.
 
 ---
 
-*Document version: 1.0 — Command line ETL user manual.*
+## 17. Related entry points
+
+- **`architecture planning.md`** — full behavioral spec, GUI batch/dashboard publish toggle, duplicate-warning behavior.  
+- **`icms_gui.py`** — Tkinter front end calling **`icms_etl_core`** (editable vacant/exit sheet names, dashboard publish checkbox, duplicate warnings).
+
+---
+
+*Document version: 2.0 — Command line ETL user manual aligned with vacant slots, exit log history, deterministic master rebuild, batch mode, and header-row detection.*
