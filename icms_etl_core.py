@@ -100,6 +100,24 @@ EXIT_FIELDS: List[str] = [
     "New ICMS Provider",
 ]
 
+SERVICES_LOG_FIELDS: List[str] = [
+    "Row ID",
+    "CHAMP ID",
+    "DHS Master Agreement #",
+    "ICMS Work Order #",
+    "ICMS Provider Name",
+    "PH Building Name",
+    "ICMS Enrollment ID",
+    "ICMS Case Manager",
+    "Service ID",
+    "Service",
+    "Place of Service",
+    "Service Date",
+    "Service Record Created Date",
+    "CHAMP User Who Created Record",
+    "Organization of CHAMP User Who Created Record",
+]
+
 KEY_FIELDS: List[str] = ["CHAMP ID", "ICMS Project Name"]
 
 ALIASES_FILENAME = "field_aliases.json"
@@ -784,6 +802,27 @@ def read_exit_log(wb: openpyxl.Workbook) -> pd.DataFrame:
     return df[available].copy()
 
 
+def read_services_log(
+    wb: openpyxl.Workbook,
+    sheet_name: str = "Services Log",
+) -> pd.DataFrame:
+    """Read the Services Log sheet from an already-open workbook.
+
+    Retains known services-log columns where present.
+    Returns an empty DataFrame with a warning if the sheet is missing.
+    """
+    if sheet_name not in wb.sheetnames:
+        print(
+            f"WARNING: Sheet '{sheet_name}' not found in workbook. "
+            "Services log data will be skipped."
+        )
+        return pd.DataFrame()
+
+    df = read_sheet(wb, sheet_name)
+    available = [c for c in SERVICES_LOG_FIELDS if c in df.columns]
+    return df[available].copy()
+
+
 # ── Output file writers ───────────────────────────────────────────────────────
 
 def update_dashboard_flatfile(
@@ -922,6 +961,153 @@ def update_exit_log_history(
         raise RuntimeError(f"Could not write exit log history: {exc}") from exc
 
     return len(combined)
+
+
+def _build_services_event_key_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Return deterministic service-event keys for deduplication/comparison."""
+    work = df.copy()
+    for col in SERVICES_LOG_FIELDS:
+        if col not in work.columns:
+            work[col] = ""
+    for col in SERVICES_LOG_FIELDS:
+        work[col] = work[col].fillna("").astype(str).str.strip()
+
+    service_id = work["Service ID"]
+    has_service_id = service_id.ne("")
+    fallback = (
+        work["CHAMP ID"] + "|" +
+        work["ICMS Enrollment ID"] + "|" +
+        work["Service"] + "|" +
+        work["Place of Service"] + "|" +
+        work["Service Date"] + "|" +
+        work["Service Record Created Date"]
+    )
+    event_key = service_id.where(has_service_id, "__fallback__|" + fallback)
+    return pd.DataFrame(
+        {
+            "service_event_key": event_key,
+            "has_service_id": has_service_id.astype(bool),
+        }
+    )
+
+
+def summarize_services_overlap(
+    services_df: pd.DataFrame,
+    output_dir: Path,
+) -> Dict[str, float]:
+    """Summarise incoming services-table overlap against cumulative history."""
+    summary: Dict[str, float] = {
+        "incoming_event_key_count": 0,
+        "existing_overlap_rate": 0.0,
+    }
+    if services_df.empty:
+        return summary
+
+    incoming_keys_df = _build_services_event_key_df(services_df)
+    incoming_keys = set(incoming_keys_df["service_event_key"].astype(str))
+    summary["incoming_event_key_count"] = int(len(incoming_keys))
+    if not incoming_keys:
+        return summary
+
+    path = output_dir / "icms_services_log_history.csv"
+    if not path.exists():
+        return summary
+    try:
+        existing = pd.read_csv(path, dtype=str, encoding="utf-8").fillna("")
+    except Exception:
+        return summary
+    if existing.empty:
+        return summary
+    existing_keys = set(_build_services_event_key_df(existing)["service_event_key"].astype(str))
+    if not existing_keys:
+        return summary
+
+    overlap = len(incoming_keys & existing_keys)
+    summary["existing_overlap_rate"] = float(overlap / len(incoming_keys))
+    return summary
+
+
+def update_services_log_history(
+    services_df: pd.DataFrame,
+    snapshot_date: str,
+    source_file_name: str,
+    output_dir: Path,
+) -> Dict[str, float]:
+    """Append/update deduplicated Services Log history.
+
+    Cumulative history is deduplicated deterministically by a service-event key.
+    The chosen representative row per event key is the earliest
+    ``snapshot_date`` then ``source_file_name`` (stable sort), making results
+    order-independent for historical backfills.
+
+    Returns metrics used by GUI/logging.
+    """
+    path = output_dir / "icms_services_log_history.csv"
+    metrics: Dict[str, float] = {
+        "services_log_records_processed": 0,
+        "services_log_history_total_rows": 0,
+        "services_log_duplicate_records_dropped-diag": 0,
+        "services_log_blank_service_id_count-diag": 0,
+    }
+
+    if services_df.empty:
+        if path.exists():
+            try:
+                metrics["services_log_history_total_rows"] = len(
+                    pd.read_csv(path, dtype=str, encoding="utf-8")
+                )
+            except Exception:
+                metrics["services_log_history_total_rows"] = 0
+        return metrics
+
+    incoming = _strip_internal_cols(services_df).copy()
+    incoming = incoming.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+    incoming.insert(0, "source_file_name", source_file_name)
+    incoming.insert(0, "reporting_month", snapshot_date[:7])
+    incoming.insert(0, "snapshot_date", snapshot_date)
+
+    metrics["services_log_records_processed"] = int(len(incoming))
+    if "Service ID" in incoming.columns:
+        metrics["services_log_blank_service_id_count-diag"] = int(
+            incoming["Service ID"].fillna("").astype(str).str.strip().eq("").sum()
+        )
+
+    if path.exists():
+        try:
+            existing = pd.read_csv(path, dtype=str, encoding="utf-8").fillna("")
+        except Exception as exc:
+            print(
+                f"WARNING: Could not read existing services log history: {exc}. "
+                "Starting fresh."
+            )
+            existing = pd.DataFrame()
+    else:
+        existing = pd.DataFrame()
+
+    combined = pd.concat([existing, incoming], ignore_index=True, sort=False)
+    if combined.empty:
+        return metrics
+
+    key_df = _build_services_event_key_df(combined)
+    combined = combined.copy()
+    combined["_service_event_key"] = key_df["service_event_key"]
+    combined["_snap"] = pd.to_datetime(combined.get("snapshot_date", ""), errors="coerce")
+    combined["_src"] = combined.get("source_file_name", "").fillna("").astype(str)
+
+    before = len(combined)
+    combined = combined.sort_values(["_snap", "_src"], kind="stable")
+    deduped = combined.groupby("_service_event_key", sort=False).first().reset_index(drop=True)
+    dropped = max(0, before - len(deduped))
+    metrics["services_log_duplicate_records_dropped-diag"] = int(dropped)
+
+    deduped = deduped.drop(columns=["_service_event_key", "_snap", "_src"], errors="ignore")
+    try:
+        deduped.to_csv(path, index=False, encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError(f"Could not write services log history: {exc}") from exc
+
+    metrics["services_log_history_total_rows"] = int(len(deduped))
+    return metrics
 
 
 def _build_master_from_histories(output_dir: Path) -> pd.DataFrame:

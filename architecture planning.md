@@ -2,12 +2,12 @@
 
 ## What this application is
 
-A Python ETL tool for weekly DHS/HSH ICMS snapshot workbooks. It supports both CLI and Tkinter GUI workflows, normalizes varying source workbooks, and maintains cumulative historical outputs plus a deterministic master file.
+A Python ETL tool for weekly DHS/HSH ICMS snapshot workbooks. The production path is the Tkinter GUI, which normalizes varying source workbooks and maintains cumulative historical outputs plus a deterministic master file.
 
 Codebase:
 - `icms_etl_core.py` — reusable ETL logic.
-- `update_icms_snapshot_files.py` — CLI runner.
 - `icms_gui.py` — desktop GUI runner.
+- `update_icms_snapshot_files.py` — legacy/development CLI runner (not required for normal operations).
 
 ---
 
@@ -33,12 +33,14 @@ For ongoing use, the intended day-to-day path is the GUI (`icms_gui.py`), not th
 
 ### Safety features in GUI
 - Duplicate-import warning before run (`source_file_name + snapshot_date`) with include/exclude options.
+- Services-table-level duplicate-import warning when an incoming `Services Log` table appears already integrated (bypassable include/exclude/cancel).
 - Missing `Vacant Slots` / `Exit Log` sheets are warnings, not hard failures.
+- Missing `Services Log` sheet is a warning, not a hard failure.
 - Alias prompts are modal dialogs; saved aliases reduce repeated mapping work.
 
-### When to use CLI
-- Keep CLI for automation/scripting or terminal-only environments.
-- Functional behavior aligns with the same core ETL logic, but UX controls (duplicate exclusion dialogs, publish toggle) are GUI conveniences.
+### CLI status
+- CLI remains in the repo for development/backward compatibility.
+- Ongoing operational use is GUI-first.
 
 ---
 
@@ -50,6 +52,7 @@ Primary sheet categories:
 1. **Participant sheet** (user-configurable; typically `Participant Level Summary`)
 2. **Vacant slots sheet** (user-configurable; typically `Vacant Slots`)
 3. **Exit log sheet** (user-configurable; typically `Exit Log`)
+4. **Services log sheet** (user-configurable; typically `Services Log`)
 
 Header handling:
 - Participant sheet supports multi-row vendor headers through automatic header-row detection (`find_header_row`).
@@ -79,6 +82,17 @@ All outputs are written to one selected output folder.
 
 - Cumulative exit-history store.
 - Same source/date reruns replace previously written rows for that source/date pair.
+
+### `icms_services_log_history.csv`
+**Grain:** one deduplicated service event row.
+
+- Cumulative services-history store built from `Services Log`.
+- Metadata added per ingest (`snapshot_date`, `reporting_month`, `source_file_name`).
+- Order-independent deduplication:
+  - Primary event key: `Service ID` (when present/nonblank).
+  - Fallback key: `CHAMP ID + ICMS Enrollment ID + Service + Place of Service + Service Date + Service Record Created Date`.
+- Deterministic representative row per event key is preserved by earliest `snapshot_date` then `source_file_name`.
+- Historical backfill can run in any order without duplicating service events.
 
 ### `icms_client_project_master.xlsx`
 **Grain:** one row per `CHAMP ID + ICMS Project Name`.
@@ -179,7 +193,7 @@ Single-window app with 3 panels (Setup → Run → Results), background worker t
 - Single-file picker (`Browse…`) and multi-file picker (`Browse files…`).
 - Batch file summary display.
 - Snapshot date input (disabled in multi-file mode; dates come from batch confirmation).
-- Editable sheet names (participant, vacant, exit).
+- Editable sheet names (participant, vacant, exit, services).
 - Password input with optional keyring save/load.
 - Output folder picker.
 - Run behavior toggle: publish current dashboard file on/off.
@@ -206,11 +220,16 @@ Batch:
   - cancel batch.
 - handles “all excluded” safely by stopping run.
 
+Services table-level duplicate warning (separate from file/date warning):
+- compares incoming `Services Log` event keys against `icms_services_log_history.csv`.
+- warns only when the incoming table appears already integrated (high overlap and/or same file+date already present).
+- does **not** warn for expected row-level duplicate service events.
+
 ### Run panel
 - 7-step progress indicator.
 - live log stream.
 - resilient per-file behavior in batch (continue on file failure).
-- missing vacant/exit sheets are warnings, not hard failures.
+- missing vacant/exit/services sheets are warnings, not hard failures.
 
 ### Batch dashboard publish rule
 - In batch mode, dashboard flatfile publishes only for newest snapshot in confirmed batch.
@@ -219,8 +238,26 @@ Batch:
 ### Results panel
 - Single-file: detailed run summary.
 - Batch: files processed/succeeded/failed, dashboard source file, per-file outcomes.
-- Includes skipped-duplicate reporting when applicable.
+- Includes skipped-duplicate reporting for file/date and services-table duplicate exclusions when applicable.
 - Clickable output folder link.
 
 ### UX style
 Warm off-white palette, muted accent color, flat controls, generous spacing, fixed-width design with vertical scrolling support in Setup.
+
+---
+
+## Build Windows EXE
+
+Prerequisites:
+- Python environment with dependencies from `requirements.txt`.
+- `pyinstaller` installed (example: `python -m pip install pyinstaller`).
+
+Build command (from repo root):
+
+```bash
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "ICMS Snapshot ETL" icms_gui.py
+```
+
+Output:
+- executable at `dist/ICMS Snapshot ETL.exe`
+- build artifacts in `build/` and the generated `.spec` file.

@@ -493,6 +493,100 @@ class _BatchDuplicateDialog(tk.Toplevel):
         self.destroy()
 
 
+class _BatchServicesDuplicateDialog(tk.Toplevel):
+    """Modal dialog for files whose Services Log appears already integrated."""
+
+    def __init__(self, parent: tk.Tk, duplicates: List[Tuple[Path, str]]):
+        super().__init__(parent)
+        self.title("Services Log Appears Already Integrated")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        self._duplicates = duplicates
+        self.action: str = "cancel"  # exclude | include | cancel
+        self._build()
+        self._center(parent)
+
+    def _build(self):
+        outer = ttk.Frame(self, padding=PAD)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(
+            outer,
+            text=(
+                "Some selected files have a Services Log table that appears\n"
+                "already integrated in this output folder.\n\n"
+                "This warning is table-level (whole Services Log overlap),\n"
+                "not row-level duplicates."
+            ),
+            font=F_LABEL,
+            foreground=FG_MUTED,
+            background=BG,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
+        list_frame = ttk.Frame(outer)
+        list_frame.pack(fill="both", expand=True)
+        lb = tk.Listbox(
+            list_frame,
+            font=F_LABEL,
+            height=min(10, max(3, len(self._duplicates))),
+            bg=INPUT_BG,
+            fg=FG,
+            relief="flat",
+            borderwidth=1,
+        )
+        sb = ttk.Scrollbar(list_frame, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        for p, s in self._duplicates:
+            lb.insert(tk.END, f"{s}  |  {p.name}")
+
+        btn = ttk.Frame(outer)
+        btn.pack(fill="x", pady=(12, 0))
+        ttk.Button(
+            btn,
+            text="Exclude flagged files (recommended)",
+            command=self._on_exclude,
+        ).pack(side="left")
+        ttk.Button(
+            btn,
+            text="Include all anyway",
+            command=self._on_include,
+        ).pack(side="right")
+        ttk.Button(
+            outer,
+            text="Cancel",
+            command=self._on_cancel,
+        ).pack(anchor="e", pady=(8, 0))
+
+    def _center(self, parent: tk.Tk):
+        self.update_idletasks()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        px = parent.winfo_x()
+        py = parent.winfo_y()
+        dw = self.winfo_reqwidth()
+        dh = self.winfo_reqheight()
+        self.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+    def _on_exclude(self):
+        self.action = "exclude"
+        self.destroy()
+
+    def _on_include(self):
+        self.action = "include"
+        self.destroy()
+
+    def _on_cancel(self):
+        self.action = "cancel"
+        self.destroy()
+
+
 # ── Main application ──────────────────────────────────────────────────────────
 
 class ICMSApp(tk.Tk):
@@ -515,6 +609,7 @@ class ICMSApp(tk.Tk):
         self._batch_files: List[Path] = []
         self._batch_date_rows: List[dict] = []
         self._last_skipped_duplicates: List[Tuple[Path, str]] = []
+        self._last_skipped_services_duplicates: List[Tuple[Path, str]] = []
 
         self._configure_styles()
 
@@ -723,6 +818,12 @@ class ICMSApp(tk.Tk):
         self._exit_sheet_var = tk.StringVar(value="Exit Log")
         self._exit_sheet_var.trace_add("write", self._on_field_changed)
         ttk.Entry(body, textvariable=self._exit_sheet_var,
+                  font=F_BODY).pack(fill="x", pady=(3, 0))
+
+        self._mk_label(body, "Services log sheet", top_pad=6)
+        self._services_sheet_var = tk.StringVar(value="Services Log")
+        self._services_sheet_var.trace_add("write", self._on_field_changed)
+        ttk.Entry(body, textvariable=self._services_sheet_var,
                   font=F_BODY).pack(fill="x", pady=(3, 0))
 
         self._sheet_err = self._mk_err(body)
@@ -965,6 +1066,9 @@ class ICMSApp(tk.Tk):
         saved_exit_sheet = settings.get("last_exit_sheet_name", "")
         if saved_exit_sheet:
             self._exit_sheet_var.set(saved_exit_sheet)
+        saved_services_sheet = settings.get("last_services_sheet_name", "")
+        if saved_services_sheet:
+            self._services_sheet_var.set(saved_services_sheet)
 
         # Keyring
         if _HAS_KEYRING:
@@ -1056,6 +1160,7 @@ class ICMSApp(tk.Tk):
             not self._sheet_var.get().strip()
             or not self._vacant_sheet_var.get().strip()
             or not self._exit_sheet_var.get().strip()
+            or not self._services_sheet_var.get().strip()
         ):
             self._sheet_err.config(text="All worksheet names are required.")
             ok = False
@@ -1263,6 +1368,74 @@ class ICMSApp(tk.Tk):
                 dups.append((p, snap))
         return dups
 
+    def _services_table_already_integrated(
+        self,
+        path: Path,
+        snapshot_date: str,
+        services_sheet_name: str,
+        output_dir: Path,
+        overlap_threshold: float = 0.98,
+    ) -> Tuple[bool, Dict[str, float]]:
+        """Return True when incoming Services Log table appears already loaded."""
+        metrics: Dict[str, float] = {
+            "incoming_event_key_count": 0,
+            "existing_overlap_rate": 0.0,
+            "already_integrated_warning": 0.0,
+        }
+        try:
+            wb, _ = core.open_workbook(path, password=self._pw_var.get())
+        except Exception:
+            return False, metrics
+
+        try:
+            services_df = core.read_services_log(wb, sheet_name=services_sheet_name)
+        finally:
+            wb.close()
+
+        overlap = core.summarize_services_overlap(services_df, output_dir)
+        incoming_count = int(overlap.get("incoming_event_key_count", 0) or 0)
+        overlap_rate = float(overlap.get("existing_overlap_rate", 0.0) or 0.0)
+        metrics["incoming_event_key_count"] = incoming_count
+        metrics["existing_overlap_rate"] = overlap_rate
+
+        if incoming_count <= 0:
+            return False, metrics
+
+        # Strong signal #1: same source file + snapshot date already in services history.
+        path_hist = output_dir / "icms_services_log_history.csv"
+        same_file_date = False
+        if path_hist.exists():
+            try:
+                hist = pd.read_csv(path_hist, dtype=str, encoding="utf-8").fillna("")
+                if {"source_file_name", "snapshot_date"}.issubset(hist.columns):
+                    same_file_date = bool(
+                        (
+                            (hist["source_file_name"].astype(str).str.strip() == path.name)
+                            & (hist["snapshot_date"].astype(str).str.strip() == str(snapshot_date).strip())
+                        ).any()
+                    )
+            except Exception:
+                same_file_date = False
+
+        already = bool(same_file_date or overlap_rate >= overlap_threshold)
+        metrics["already_integrated_warning"] = 1.0 if already else 0.0
+        return already, metrics
+
+    def _find_services_duplicate_candidates(
+        self,
+        candidates: List[Tuple[Path, str]],
+        services_sheet_name: str,
+        output_dir: Path,
+    ) -> List[Tuple[Path, str]]:
+        out: List[Tuple[Path, str]] = []
+        for p, snap in candidates:
+            already, _ = self._services_table_already_integrated(
+                p, snap, services_sheet_name, output_dir
+            )
+            if already:
+                out.append((p, snap))
+        return out
+
     def _auto_fill_from_file(self, filepath: str):
         parsed = _parse_date_from_filename(Path(filepath).name)
         if parsed:
@@ -1305,6 +1478,7 @@ class ICMSApp(tk.Tk):
         sheet_name  = self._sheet_var.get().strip()
         vacant_sheet_name = self._vacant_sheet_var.get().strip()
         exit_sheet_name = self._exit_sheet_var.get().strip()
+        services_sheet_name = self._services_sheet_var.get().strip()
         publish_dashboard = self._publish_dashboard_var.get()
         password    = self._pw_var.get()
         output_dir  = Path(self._folder_var.get())
@@ -1327,6 +1501,7 @@ class ICMSApp(tk.Tk):
 
         integrated_keys = self._load_integrated_file_keys(output_dir)
         self._last_skipped_duplicates = []
+        self._last_skipped_services_duplicates = []
 
         self._current_output_dir = output_dir
 
@@ -1365,6 +1540,44 @@ class ICMSApp(tk.Tk):
                 if not proceed:
                     return
 
+        # Services-table-level already-ingested warning / exclusion handling
+        if len(batch_files) > 1 and confirmed_batch is not None:
+            svc_dups = self._find_services_duplicate_candidates(
+                confirmed_batch, services_sheet_name, output_dir
+            )
+            if svc_dups:
+                svc_dialog = _BatchServicesDuplicateDialog(self, svc_dups)
+                self.wait_window(svc_dialog)
+                if svc_dialog.action == "cancel":
+                    return
+                if svc_dialog.action == "exclude":
+                    dup_set = {(p.name, s) for p, s in svc_dups}
+                    filtered = [(p, s) for (p, s) in confirmed_batch if (p.name, s) not in dup_set]
+                    self._last_skipped_services_duplicates = svc_dups
+                    if not filtered:
+                        messagebox.showinfo(
+                            "Nothing to ingest",
+                            "All selected files were excluded because their Services Log table "
+                            "appears already integrated.",
+                        )
+                        return
+                    confirmed_batch = filtered
+        elif input_path is not None:
+            svc_already, _ = self._services_table_already_integrated(
+                input_path, snap_date, services_sheet_name, output_dir
+            )
+            if svc_already:
+                proceed = messagebox.askokcancel(
+                    "Services Log appears already integrated",
+                    (
+                        f"The Services Log table in '{input_path.name}' appears already "
+                        "integrated into this output folder.\n\n"
+                        "Continue anyway?"
+                    ),
+                )
+                if not proceed:
+                    return
+
         # Reset Run panel
         self._progress["value"] = 0
         self._step_lbl.config(text="Starting…")
@@ -1383,6 +1596,7 @@ class ICMSApp(tk.Tk):
                 sheet_name,
                 vacant_sheet_name,
                 exit_sheet_name,
+                services_sheet_name,
                 publish_dashboard,
                 password,
                 output_dir,
@@ -1400,6 +1614,7 @@ class ICMSApp(tk.Tk):
         sheet_name: str,
         vacant_sheet_name: str,
         exit_sheet_name: str,
+        services_sheet_name: str,
         publish_dashboard: bool,
         password: str,
         output_dir: Path,
@@ -1410,6 +1625,7 @@ class ICMSApp(tk.Tk):
                 sheet_name=sheet_name,
                 vacant_sheet_name=vacant_sheet_name,
                 exit_sheet_name=exit_sheet_name,
+                services_sheet_name=services_sheet_name,
                 password=password,
                 output_dir=output_dir,
                 publish_latest_only=True,
@@ -1430,6 +1646,7 @@ class ICMSApp(tk.Tk):
             sheet_name=sheet_name,
             vacant_sheet_name=vacant_sheet_name,
             exit_sheet_name=exit_sheet_name,
+            services_sheet_name=services_sheet_name,
             publish_dashboard=publish_dashboard,
             password=password,
             output_dir=output_dir,
@@ -1445,6 +1662,7 @@ class ICMSApp(tk.Tk):
         sheet_name: str,
         vacant_sheet_name: str,
         exit_sheet_name: str,
+        services_sheet_name: str,
         publish_dashboard: bool,
         password: str,
         output_dir: Path,
@@ -1472,6 +1690,16 @@ class ICMSApp(tk.Tk):
             incoming_blank_champ_id_count_diag = 0
             incoming_blank_project_name_count_diag = 0
             incoming_duplicate_key_count_diag = 0
+            services_metrics: Dict[str, float] = {
+                "services_log_records_processed": 0,
+                "services_log_history_total_rows": 0,
+                "services_log_duplicate_records_dropped-diag": 0,
+                "services_log_blank_service_id_count-diag": 0,
+                "services_log_incoming_event_key_count-diag": 0,
+                "services_log_existing_key_overlap_rate-diag": 0.0,
+                "services_log_already_integrated_warning-diag": 0,
+                "services_log_missing_sheet-diag": 0,
+            }
 
             # ── 1. Open workbook ───────────────────────────────────────────
             step(1)
@@ -1556,6 +1784,19 @@ class ICMSApp(tk.Tk):
                         level="warn",
                     )
                     notes.append(f"Missing sheet: {exit_sheet_name} (exit data skipped)")
+
+                services_df = pd.DataFrame()
+                if services_sheet_name in sheets:
+                    log(f"Reading sheet: {services_sheet_name}")
+                    services_df = core.read_services_log(wb, sheet_name=services_sheet_name)
+                else:
+                    services_metrics["services_log_missing_sheet-diag"] = 1
+                    log(
+                        f"WARNING: Sheet '{services_sheet_name}' not found; "
+                        "services-log data will be skipped for this run.",
+                        level="warn",
+                    )
+                    notes.append(f"Missing sheet: {services_sheet_name} (services data skipped)")
             finally:
                 wb.close()
 
@@ -1566,6 +1807,7 @@ class ICMSApp(tk.Tk):
             log(f"Participant rows read: {input_row_count}")
             log(f"Vacant slot records:   {len(vacant_df)}")
             log(f"Exit log records:      {len(exit_df)}")
+            log(f"Services log records:  {len(services_df)}")
 
             if input_row_count == 0:
                 raise ValueError("No data rows found in the selected sheet.")
@@ -1744,6 +1986,31 @@ class ICMSApp(tk.Tk):
             # ── 7. Write logs ──────────────────────────────────────────────
             step(7)
 
+            overlap_summary = core.summarize_services_overlap(services_df, output_dir)
+            incoming_event_keys_diag = int(overlap_summary.get("incoming_event_key_count", 0) or 0)
+            existing_overlap_rate_diag = float(overlap_summary.get("existing_overlap_rate", 0.0) or 0.0)
+            services_metrics["services_log_incoming_event_key_count-diag"] = incoming_event_keys_diag
+            services_metrics["services_log_existing_key_overlap_rate-diag"] = existing_overlap_rate_diag
+            if incoming_event_keys_diag > 0 and existing_overlap_rate_diag >= 0.98:
+                services_metrics["services_log_already_integrated_warning-diag"] = 1
+                msg = (
+                    "Services Log table appears already integrated "
+                    f"(overlap={existing_overlap_rate_diag:.4f})"
+                )
+                anomalies_diag.append(msg)
+                log(f"DIAG WARNING: {msg}", level="warn")
+
+            services_update = core.update_services_log_history(
+                services_df, snapshot_date, source_file_name, output_dir
+            )
+            services_metrics.update(services_update)
+            log(
+                "Services log history: "
+                f"{int(services_metrics.get('services_log_history_total_rows', 0))} total rows "
+                f"({int(services_metrics.get('services_log_duplicate_records_dropped-diag', 0))} "
+                "duplicates dropped)"
+            )
+
             if dup_flag_count > 0:
                 try:
                     warn_df = core.build_duplicate_warning_rows(
@@ -1776,6 +2043,30 @@ class ICMSApp(tk.Tk):
                 "optional_fields_missing_count":        len(missing_opt),
                 "field_aliases_added_count":            aliases_added,
                 "duplicate_client_project_count":       dup_flag_count,
+                "services_log_records_processed": int(
+                    services_metrics.get("services_log_records_processed", 0)
+                ),
+                "services_log_history_total_rows": int(
+                    services_metrics.get("services_log_history_total_rows", 0)
+                ),
+                "services_log_duplicate_records_dropped-diag": int(
+                    services_metrics.get("services_log_duplicate_records_dropped-diag", 0)
+                ),
+                "services_log_missing_sheet-diag": int(
+                    services_metrics.get("services_log_missing_sheet-diag", 0)
+                ),
+                "services_log_blank_service_id_count-diag": int(
+                    services_metrics.get("services_log_blank_service_id_count-diag", 0)
+                ),
+                "services_log_incoming_event_key_count-diag": int(
+                    services_metrics.get("services_log_incoming_event_key_count-diag", 0)
+                ),
+                "services_log_existing_key_overlap_rate-diag": float(
+                    services_metrics.get("services_log_existing_key_overlap_rate-diag", 0.0)
+                ),
+                "services_log_already_integrated_warning-diag": int(
+                    services_metrics.get("services_log_already_integrated_warning-diag", 0)
+                ),
                 "key_field_float_normalizations-diag": int(
                     read_stats.get("key_field_float_normalizations-diag", 0) or 0
                 ),
@@ -1812,11 +2103,21 @@ class ICMSApp(tk.Tk):
                 "sheet_name":       sheet_name,
                 "vacant_sheet_name": vacant_sheet_name,
                 "exit_sheet_name":  exit_sheet_name,
+                "services_sheet_name": services_sheet_name,
                 "snapshot_date":    snapshot_date,
                 "dashboard_count":  dashboard_count,
                 "dashboard_published": publish_dashboard,
                 "vacant_slot_count": vacant_slot_count,
                 "exit_log_count":   len(exit_df),
+                "services_log_count": int(
+                    services_metrics.get("services_log_records_processed", 0)
+                ),
+                "services_log_history_count": int(
+                    services_metrics.get("services_log_history_total_rows", 0)
+                ),
+                "services_log_dupes_dropped": int(
+                    services_metrics.get("services_log_duplicate_records_dropped-diag", 0)
+                ),
                 "history_count":    history_count,
                 "master_total":     master_total,
                 "exited_count":     exited_count,
@@ -1858,6 +2159,7 @@ class ICMSApp(tk.Tk):
         sheet_name: str,
         vacant_sheet_name: str,
         exit_sheet_name: str,
+        services_sheet_name: str,
         password: str,
         output_dir: Path,
         publish_latest_only: bool,
@@ -1883,6 +2185,7 @@ class ICMSApp(tk.Tk):
                 sheet_name=sheet_name,
                 vacant_sheet_name=vacant_sheet_name,
                 exit_sheet_name=exit_sheet_name,
+                services_sheet_name=services_sheet_name,
                 publish_dashboard=publish_dashboard,
                 password=password,
                 output_dir=output_dir,
@@ -1936,9 +2239,14 @@ class ICMSApp(tk.Tk):
                     {"source_file_name": p.name, "snapshot_date": s}
                     for p, s in self._last_skipped_duplicates
                 ],
+                "skipped_services_duplicates": [
+                    {"source_file_name": p.name, "snapshot_date": s}
+                    for p, s in self._last_skipped_services_duplicates
+                ],
                 "sheet_name": sheet_name,
                 "vacant_sheet_name": vacant_sheet_name,
                 "exit_sheet_name": exit_sheet_name,
+                "services_sheet_name": services_sheet_name,
                 "output_dir": str(output_dir.resolve()),
             },
         })
@@ -2018,6 +2326,7 @@ class ICMSApp(tk.Tk):
                 "last_main_sheet_name": results["sheet_name"],
                 "last_vacant_sheet_name": results.get("vacant_sheet_name", "Vacant Slots"),
                 "last_exit_sheet_name": results.get("exit_sheet_name", "Exit Log"),
+                "last_services_sheet_name": results.get("services_sheet_name", "Services Log"),
             },
             self._script_dir,
         )
@@ -2062,9 +2371,13 @@ class ICMSApp(tk.Tk):
                 row("Participant sheet", results.get("sheet_name", ""))
                 row("Vacant slots sheet", results.get("vacant_sheet_name", ""))
                 row("Exit log sheet", results.get("exit_sheet_name", ""))
+                row("Services log sheet", results.get("services_sheet_name", ""))
                 skipped = results.get("skipped_duplicates", [])
                 if skipped:
                     row("Skipped duplicates", str(len(skipped)), warn=True)
+                svc_skipped = results.get("skipped_services_duplicates", [])
+                if svc_skipped:
+                    row("Skipped services duplicates", str(len(svc_skipped)), warn=True)
                 src = results.get("batch_dashboard_source", "")
                 if src:
                     row("Dashboard source file", src)
@@ -2093,6 +2406,7 @@ class ICMSApp(tk.Tk):
                 row("Participant sheet", results.get("sheet_name", ""))
                 row("Vacant slots sheet", results.get("vacant_sheet_name", ""))
                 row("Exit log sheet", results.get("exit_sheet_name", ""))
+                row("Services log sheet", results.get("services_sheet_name", ""))
                 row("Snapshot date",  results.get("snapshot_date", ""))
 
                 dc = results.get("dashboard_count", 0)
@@ -2103,6 +2417,12 @@ class ICMSApp(tk.Tk):
                     row("Dashboard rows", "Not published this run", warn=True)
 
                 row("Exit log records",    str(results.get("exit_log_count", 0)))
+                row(
+                    "Services log records",
+                    f"{results.get('services_log_count', 0)} "
+                    f"(history {results.get('services_log_history_count', 0)}, "
+                    f"dropped {results.get('services_log_dupes_dropped', 0)})",
+                )
                 row("Snapshot history",    f"{results.get('history_count', 0)} total rows")
 
                 mt  = results.get("master_total", 0)
@@ -2185,6 +2505,7 @@ class ICMSApp(tk.Tk):
         saved_sheet   = self._sheet_var.get()
         saved_vacant_sheet = self._vacant_sheet_var.get()
         saved_exit_sheet = self._exit_sheet_var.get()
+        saved_services_sheet = self._services_sheet_var.get()
         saved_publish = self._publish_dashboard_var.get()
 
         # Clear file
@@ -2211,6 +2532,7 @@ class ICMSApp(tk.Tk):
         self._sheet_var.set(saved_sheet)
         self._vacant_sheet_var.set(saved_vacant_sheet)
         self._exit_sheet_var.set(saved_exit_sheet)
+        self._services_sheet_var.set(saved_services_sheet)
         self._publish_dashboard_var.set(saved_publish)
 
         # Reset Run panel state
