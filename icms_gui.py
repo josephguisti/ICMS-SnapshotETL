@@ -2392,6 +2392,15 @@ class ICMSApp(tk.Tk):
                     snap = r.get("snapshot_date", "")
                     name = r.get("source_file_name", "")
                     row("  " + name, f"{snap}  [{status}]", warn=warn)
+                failed_files = results.get("batch_failed_files", [])
+                if failed_files:
+                    t.insert(tk.END, "\n  Failure reasons\n", "lbl")
+                    for item in failed_files:
+                        name = item.get("source_file_name", "")
+                        snap = item.get("snapshot_date", "")
+                        err = item.get("error", "Unspecified error")
+                        t.insert(tk.END, f"  {name} ({snap})\n", "warn")
+                        t.insert(tk.END, f"    {err}\n", "error")
                 if skipped:
                     t.insert(tk.END, "\n  Skipped as already integrated\n", "lbl")
                     for item in skipped:

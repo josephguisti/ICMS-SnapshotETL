@@ -186,6 +186,17 @@ def open_workbook(
     if not path.exists():
         raise FileNotFoundError(f"Input file not found: {path}")
 
+    permission_msg = (
+        "Permission denied while opening the workbook.\n\n"
+        f"File: {path}\n\n"
+        "Windows blocked read access to this file. Common causes:\n"
+        "- the workbook is open in Excel or another program,\n"
+        "- OneDrive is syncing or has not fully downloaded the file,\n"
+        "- the file is in a folder where this app does not have read permission.\n\n"
+        "Close the workbook, wait for OneDrive sync to finish, or copy the file "
+        "to a local folder such as Desktop and try again."
+    )
+
     # Attempt to import msoffcrypto (optional dependency)
     try:
         import msoffcrypto  # type: ignore
@@ -201,6 +212,8 @@ def open_workbook(
             with open(path, "rb") as fh:
                 of = msoffcrypto.OfficeFile(fh)
                 is_encrypted = of.is_encrypted()
+        except PermissionError as exc:
+            raise RuntimeError(permission_msg) from exc
         except Exception as exc:
             raise RuntimeError(f"Could not inspect workbook: {exc}") from exc
     else:
@@ -209,6 +222,8 @@ def open_workbook(
         try:
             wb = openpyxl.load_workbook(path, data_only=True)
             return wb, False
+        except PermissionError as exc:
+            raise RuntimeError(permission_msg) from exc
         except Exception:
             raise RuntimeError(
                 "The workbook could not be opened.  It may be password-protected.\n"
@@ -221,6 +236,8 @@ def open_workbook(
         try:
             wb = openpyxl.load_workbook(path, data_only=True)
             return wb, False
+        except PermissionError as exc:
+            raise RuntimeError(permission_msg) from exc
         except Exception as exc:
             raise RuntimeError(f"Could not open workbook: {exc}") from exc
 
@@ -238,6 +255,8 @@ def open_workbook(
         buf.seek(0)
         wb = openpyxl.load_workbook(buf, data_only=True)
         return wb, True
+    except PermissionError as exc:
+        raise RuntimeError(permission_msg) from exc
     except Exception as exc:
         raise RuntimeError(
             f"Could not decrypt workbook (wrong password?): {exc}"
@@ -846,7 +865,14 @@ def update_dashboard_flatfile(
     out["is_vacant_slot"] = False
 
     if not vacant_rows.empty:
-        combined = pd.concat([out, vacant_rows], ignore_index=True, sort=False)
+        combined_cols = list(out.columns) + [
+            c for c in vacant_rows.columns if c not in out.columns
+        ]
+        combined_records = (
+            out.reindex(columns=combined_cols).to_dict("records")
+            + vacant_rows.reindex(columns=combined_cols).to_dict("records")
+        )
+        combined = pd.DataFrame(combined_records, columns=combined_cols)
     else:
         combined = out
 
@@ -1101,6 +1127,10 @@ def update_services_log_history(
     metrics["services_log_duplicate_records_dropped-diag"] = int(dropped)
 
     deduped = deduped.drop(columns=["_service_event_key", "_snap", "_src"], errors="ignore")
+    if "PH Building Name" in deduped.columns:
+        ph_building = deduped["PH Building Name"].fillna("").astype(str)
+        blank_mask = ph_building.str.strip().eq("")
+        deduped.loc[blank_mask, "PH Building Name"] = "Scattered Site"
     try:
         deduped.to_csv(path, index=False, encoding="utf-8")
     except Exception as exc:
