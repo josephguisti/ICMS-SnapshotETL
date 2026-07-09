@@ -1668,6 +1668,7 @@ class ICMSApp(tk.Tk):
         output_dir: Path,
         aliases: Optional[Dict[str, str]],
         emit_done_event: bool,
+        defer_master_rebuild: bool = False,
     ) -> dict:
         gq = self._gui_q
         rq = self._resp_q
@@ -1926,22 +1927,34 @@ class ICMSApp(tk.Tk):
             log(f"Snapshot history: {history_count} total rows")
             # ── 6. Client/project master ───────────────────────────────────
             step(6)
-            log("Updating client/project master…")
-            (
-                master_total, new_rows, returning_rows,
-                not_present, exited_count, unknown_count,
-            ) = core.update_client_project_master(
-                df, snapshot_date, source_file_name, output_dir, exit_df)
-            if (new_rows + returning_rows) > 0:
-                overlap_rate_diag = round(
-                    (returning_rows / (new_rows + returning_rows)), 4
+            if defer_master_rebuild:
+                log("Recording exit-log history for batch (master rebuild deferred)…")
+                core.record_master_inputs(
+                    exit_df, snapshot_date, source_file_name, output_dir)
+                master_total = 0
+                new_rows = 0
+                returning_rows = 0
+                not_present = 0
+                exited_count = 0
+                unknown_count = 0
+                notes.append("Client/project master rebuild deferred until batch completes")
+            else:
+                log("Updating client/project master…")
+                (
+                    master_total, new_rows, returning_rows,
+                    not_present, exited_count, unknown_count,
+                ) = core.update_client_project_master(
+                    df, snapshot_date, source_file_name, output_dir, exit_df)
+                if (new_rows + returning_rows) > 0:
+                    overlap_rate_diag = round(
+                        (returning_rows / (new_rows + returning_rows)), 4
+                    )
+                log(
+                    f"Master: {master_total} rows  "
+                    f"({new_rows} new, {returning_rows} returning, "
+                    f"{not_present} absent, {exited_count} exited, "
+                    f"{unknown_count} unknown)"
                 )
-            log(
-                f"Master: {master_total} rows  "
-                f"({new_rows} new, {returning_rows} returning, "
-                f"{not_present} absent, {exited_count} exited, "
-                f"{unknown_count} unknown)"
-            )
 
             key_norm_diag = int(read_stats.get("key_field_float_normalizations-diag", 0) or 0)
             if key_norm_diag > 0:
@@ -2191,12 +2204,52 @@ class ICMSApp(tk.Tk):
                 output_dir=output_dir,
                 aliases=aliases,
                 emit_done_event=False,
+                defer_master_rebuild=True,
             )
             results.append(result)
 
         success_count = sum(1 for r in results if r.get("success"))
         fail_count = total - success_count
         failed_results = [r for r in results if not r.get("success")]
+
+        final_master = 0
+        final_exited = 0
+        final_unknown = 0
+        if success_count > 0:
+            gq.put({
+                "type": "log",
+                "msg": f"[{dt.datetime.now().strftime('%H:%M:%S')}]  "
+                       "Rebuilding client/project master once for completed batch…",
+                "level": "info",
+            })
+            try:
+                final_master, final_exited, final_unknown = (
+                    core.rebuild_client_project_master(output_dir)
+                )
+                gq.put({
+                    "type": "log",
+                    "msg": f"[{dt.datetime.now().strftime('%H:%M:%S')}]  "
+                           f"Batch master rebuild complete: {final_master} rows "
+                           f"({final_exited} exited, {final_unknown} unknown)",
+                    "level": "info",
+                })
+            except Exception as exc:
+                err_msg = str(exc).strip() or exc.__class__.__name__
+                gq.put({
+                    "type": "log",
+                    "msg": f"[{dt.datetime.now().strftime('%H:%M:%S')}]  "
+                           f"ERROR: Batch master rebuild failed: {err_msg}",
+                    "level": "error",
+                })
+                if not failed_results:
+                    failed_results.append({
+                        "success": False,
+                        "source_file_name": "",
+                        "snapshot_date": "",
+                        "error": f"Batch master rebuild failed: {err_msg}",
+                    })
+                    fail_count = 1
+                    success_count = max(0, success_count - 1)
         first_error = ""
         if failed_results:
             first_error = str(failed_results[0].get("error", "")).strip()
@@ -2209,10 +2262,6 @@ class ICMSApp(tk.Tk):
                 if r.get("success") and r.get("dashboard_published")
             ),
             "",
-        )
-        final_master = next(
-            (r.get("master_total", 0) for r in reversed(results) if r.get("success")),
-            0,
         )
 
         gq.put({
@@ -2234,6 +2283,8 @@ class ICMSApp(tk.Tk):
                     for r in failed_results
                 ],
                 "master_total": final_master,
+                "master_exited_count": final_exited,
+                "master_unknown_count": final_unknown,
                 "error": first_error if fail_count > 0 else "",
                 "skipped_duplicates": [
                     {"source_file_name": p.name, "snapshot_date": s}

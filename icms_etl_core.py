@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import openpyxl
 import pandas as pd
 
@@ -68,6 +69,23 @@ REQUIRED_QUEUE_FIELDS: List[str] = [
 
 REQUIRED_FIELDS: List[str] = REQUIRED_KEY_FIELDS + REQUIRED_QUEUE_FIELDS
 
+MOST_RECENT_FIELDS: List[str] = [
+    "Most Recent Demographic Profile Update",
+    "Most Recent Household Composition Profile Update",
+    "Most Recent Medical Profile Update",
+    "Most Recent Legal Profile Update",
+    "Most Recent PH Update",
+    "Most Recent HMIS Universal Data Assessment",
+    "Most Recent HMIS Financial Assessment",
+    "Most Recent HMIS Barriers Assessment",
+    "Most Recent HMIS DV Assessment",
+    "Most Recent 5x5 Assessment",
+    "Most Recent Housing Acuity Index (HAI) Assessment",
+    "Most Recent Pending Action Step in the Care Plan",
+    "Most Recent Completed Action Step in the Care Plan",
+    "Most Recent Health Care Accompaniment",
+]
+
 OPTIONAL_FIELDS: List[str] = [
     "ICMS Enrollment ID",
     "ICMS Billing Rate",
@@ -79,7 +97,7 @@ OPTIONAL_FIELDS: List[str] = [
     "Family Billing Rate But Dependent Household Member(s) Not Listed in Household Composition?",
     "Eligible Services Recorded for This Month",
     "Universal Housing Application (UHA) Status",
-]
+] + MOST_RECENT_FIELDS
 
 ALL_APPROVED_FIELDS: List[str] = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
@@ -611,6 +629,8 @@ def reduce_to_approved_fields(
 
     - Renames actual workbook column names to their canonical equivalents.
     - Inserts the three metadata columns at the front.
+    - Backfills unresolved approved fields with null so output schema is stable
+      across workbooks that accrete columns over time.
     - Preserves the internal ``_source_row_number`` column for downstream
       duplicate-warning logic; output writers strip it before saving.
     - Drops rows where either key field (``CHAMP ID`` or
@@ -627,11 +647,22 @@ def reduce_to_approved_fields(
     df_out = df[cols_to_keep].copy()
     df_out = df_out.rename(columns=rename_map)
 
+    for field in ALL_APPROVED_FIELDS:
+        if field not in df_out.columns:
+            df_out[field] = pd.NA
+
     # Prepend metadata (inserted at position 0, so reverse order)
     reporting_month = snapshot_date[:7]  # YYYY-MM
     df_out.insert(0, "source_file_name", source_file_name)
     df_out.insert(0, "reporting_month", reporting_month)
     df_out.insert(0, "snapshot_date", snapshot_date)
+
+    ordered_cols = (
+        METADATA_FIELDS
+        + ALL_APPROVED_FIELDS
+        + (["_source_row_number"] if "_source_row_number" in df_out.columns else [])
+    )
+    df_out = df_out[ordered_cols]
 
     dropped_blank_key_rows = 0
     if all(k in df_out.columns for k in KEY_FIELDS):
@@ -1215,55 +1246,96 @@ def _build_master_from_histories(output_dir: Path) -> pd.DataFrame:
     master = master.reindex(columns=all_master_cols, fill_value="")
 
     if not latest_exit.empty:
-        exit_map = {}
-        for _, r in latest_exit.iterrows():
-            key = (_safe_str(r.get("CHAMP ID", "")), _safe_str(r.get("ICMS Project Name", "")))
-            exit_map[key] = r
-
         if master.empty:
             master = pd.DataFrame(columns=all_master_cols)
 
-        # Update participant-derived rows with exit data where present.
-        for idx in master.index:
-            key = (_safe_str(master.at[idx, "CHAMP ID"]), _safe_str(master.at[idx, "ICMS Project Name"]))
-            row = exit_map.get(key)
-            if row is None:
-                continue
-            for f in EXIT_FIELDS:
-                if f in latest_exit.columns:
-                    master.at[idx, f] = _safe_str(row.get(f, ""))
-            # Backfill approved fields from exit history when participant history is empty for them.
-            for f in ALL_APPROVED_FIELDS:
-                if f in latest_exit.columns and _safe_str(master.at[idx, f]) == "":
-                    master.at[idx, f] = _safe_str(row.get(f, ""))
+        exit_merge_cols = [
+            c for c in (EXIT_FIELDS + ALL_APPROVED_FIELDS)
+            if c in latest_exit.columns and c not in KEY_FIELDS
+        ]
+        exit_side = latest_exit[KEY_FIELDS + exit_merge_cols].copy()
+        exit_side["_lookup_champ"] = exit_side["CHAMP ID"].map(_safe_str)
+        exit_side["_lookup_proj"] = exit_side["ICMS Project Name"].map(_safe_str)
 
-        # Add exit-only keys absent from participant history.
+        exit_rename = {c: f"{c}__exit" for c in exit_merge_cols}
+        exit_for_merge = exit_side[
+            ["_lookup_champ", "_lookup_proj"] + exit_merge_cols
+        ].rename(columns=exit_rename)
+
+        master["_lookup_champ"] = master["CHAMP ID"].map(_safe_str)
+        master["_lookup_proj"] = master["ICMS Project Name"].map(_safe_str)
+
+        merged = master.merge(
+            exit_for_merge,
+            on=["_lookup_champ", "_lookup_proj"],
+            how="left",
+            indicator=True,
+        )
+        matched = merged["_merge"] == "both"
+
+        for field in EXIT_FIELDS:
+            exit_col = f"{field}__exit"
+            if exit_col not in merged.columns:
+                continue
+            merged.loc[matched, field] = merged.loc[matched, exit_col].map(_safe_str).values
+
+        for field in ALL_APPROVED_FIELDS:
+            exit_col = f"{field}__exit"
+            if exit_col not in merged.columns:
+                continue
+            blank_mask = matched & (merged[field].map(_safe_str) == "")
+            merged.loc[blank_mask, field] = (
+                merged.loc[blank_mask, exit_col].map(_safe_str).values
+            )
+
+        master = merged[all_master_cols].copy()
+
+        # Exit-only keys absent from participant history.
         participant_keys = set(
             zip(master["CHAMP ID"].astype(str), master["ICMS Project Name"].astype(str))
         ) if not master.empty else set()
-        for key, row in exit_map.items():
-            if key in participant_keys:
-                continue
-            new_row = {c: "" for c in all_master_cols}
-            new_row["CHAMP ID"] = key[0]
-            new_row["ICMS Project Name"] = key[1]
-            for f in ALL_APPROVED_FIELDS:
-                if f in latest_exit.columns:
-                    new_row[f] = _safe_str(row.get(f, ""))
-            for f in EXIT_FIELDS:
-                if f in latest_exit.columns:
-                    new_row[f] = _safe_str(row.get(f, ""))
-            # Preserve useful metadata from exit record when available.
-            if "snapshot_date" in latest_exit.columns:
-                new_row["snapshot_date"] = _safe_str(row.get("snapshot_date", ""))
-            if "reporting_month" in latest_exit.columns:
-                new_row["reporting_month"] = _safe_str(row.get("reporting_month", ""))
-            if "source_file_name" in latest_exit.columns:
-                new_row["source_file_name"] = _safe_str(row.get("source_file_name", ""))
-            master = pd.concat([master, pd.DataFrame([new_row])], ignore_index=True)
 
-    # Derive deterministic tracking fields.
-    exit_keys = set()
+        exit_lookup_keys = list(
+            zip(
+                latest_exit["CHAMP ID"].map(_safe_str),
+                latest_exit["ICMS Project Name"].map(_safe_str),
+            )
+        )
+        exit_only_mask = [
+            lookup_key not in participant_keys for lookup_key in exit_lookup_keys
+        ]
+        exit_only_rows = latest_exit.loc[exit_only_mask].copy()
+
+        if not exit_only_rows.empty:
+            new_rows: list = []
+            for _, row in exit_only_rows.iterrows():
+                lookup_key = (
+                    _safe_str(row.get("CHAMP ID", "")),
+                    _safe_str(row.get("ICMS Project Name", "")),
+                )
+                new_row = {c: "" for c in all_master_cols}
+                new_row["CHAMP ID"] = lookup_key[0]
+                new_row["ICMS Project Name"] = lookup_key[1]
+                for field in ALL_APPROVED_FIELDS:
+                    if field in latest_exit.columns:
+                        new_row[field] = _safe_str(row.get(field, ""))
+                for field in EXIT_FIELDS:
+                    if field in latest_exit.columns:
+                        new_row[field] = _safe_str(row.get(field, ""))
+                if "snapshot_date" in latest_exit.columns:
+                    new_row["snapshot_date"] = _safe_str(row.get("snapshot_date", ""))
+                if "reporting_month" in latest_exit.columns:
+                    new_row["reporting_month"] = _safe_str(row.get("reporting_month", ""))
+                if "source_file_name" in latest_exit.columns:
+                    new_row["source_file_name"] = _safe_str(row.get("source_file_name", ""))
+                new_rows.append(new_row)
+            master = pd.concat(
+                [master, pd.DataFrame(new_rows, columns=all_master_cols)],
+                ignore_index=True,
+            )
+
+    # Derive deterministic tracking fields (vectorized).
+    exit_keys: set = set()
     if not latest_exit.empty:
         exit_keys = set(
             zip(
@@ -1275,20 +1347,23 @@ def _build_master_from_histories(output_dir: Path) -> pd.DataFrame:
     if master.empty:
         return master
 
-    for idx in master.index:
-        key = (
-            _safe_str(master.at[idx, "CHAMP ID"]),
-            _safe_str(master.at[idx, "ICMS Project Name"]),
-        )
-        if key in latest_keys:
-            master.at[idx, "present_in_latest_snapshot"] = "True"
-            master.at[idx, "client_status"] = "Active"
-        else:
-            master.at[idx, "present_in_latest_snapshot"] = "False"
-            if key in exit_keys:
-                master.at[idx, "client_status"] = "Exited"
-            else:
-                master.at[idx, "client_status"] = "Unknown"
+    lookup_champ = master["CHAMP ID"].map(_safe_str)
+    lookup_proj = master["ICMS Project Name"].map(_safe_str)
+    row_keys = list(zip(lookup_champ, lookup_proj))
+
+    in_latest = pd.Series(
+        [key in latest_keys for key in row_keys], index=master.index
+    )
+    in_exit = pd.Series(
+        [key in exit_keys for key in row_keys], index=master.index
+    )
+
+    master["present_in_latest_snapshot"] = np.where(in_latest, "True", "False")
+    master["client_status"] = np.select(
+        [in_latest, in_exit],
+        ["Active", "Exited"],
+        default="Unknown",
+    )
 
     return master.reindex(columns=all_master_cols, fill_value="")
 
@@ -1362,6 +1437,87 @@ def upsert_exit_log_to_master(
     return master
 
 
+def record_master_inputs(
+    exit_df: pd.DataFrame,
+    snapshot_date: str,
+    source_file_name: str,
+    output_dir: Path,
+) -> None:
+    """Append exit-log rows for this snapshot (cheap per-file master input step)."""
+    update_exit_log_history(exit_df, snapshot_date, source_file_name, output_dir)
+
+
+def compute_incoming_master_key_stats(
+    df: pd.DataFrame,
+    output_dir: Path,
+) -> Tuple[int, int, int]:
+    """Return ``(new_rows, returning_rows, not_present_count)`` vs existing master."""
+    path = output_dir / "icms_client_project_master.xlsx"
+
+    incoming = _strip_internal_cols(df).copy()
+    incoming = incoming.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+
+    incoming_deduped = incoming.groupby(KEY_FIELDS, sort=False).last().reset_index()
+    incoming_key_set = set(
+        zip(
+            incoming_deduped["CHAMP ID"].astype(str),
+            incoming_deduped["ICMS Project Name"].astype(str),
+        )
+    ) if all(k in incoming_deduped.columns for k in KEY_FIELDS) else set()
+
+    if path.exists():
+        try:
+            existing_master = pd.read_excel(path, engine="openpyxl", dtype=str).fillna("")
+        except Exception:
+            existing_master = pd.DataFrame()
+    else:
+        existing_master = pd.DataFrame()
+
+    if (
+        not existing_master.empty
+        and all(k in existing_master.columns for k in KEY_FIELDS)
+    ):
+        existing_key_set = set(
+            zip(
+                existing_master["CHAMP ID"].astype(str),
+                existing_master["ICMS Project Name"].astype(str),
+            )
+        )
+    else:
+        existing_key_set = set()
+
+    new_count = len(incoming_key_set - existing_key_set)
+    returning_count = len(incoming_key_set & existing_key_set)
+    not_present_count = len(existing_key_set - incoming_key_set)
+    return new_count, returning_count, not_present_count
+
+
+def rebuild_client_project_master(output_dir: Path) -> Tuple[int, int, int]:
+    """Rebuild and write master from cumulative histories.
+
+    Returns
+    -------
+    (total_rows, exited_count, unknown_count)
+    """
+    path = output_dir / "icms_client_project_master.xlsx"
+    master = _build_master_from_histories(output_dir)
+    exited_count = (
+        int((master["client_status"] == "Exited").sum()) if not master.empty else 0
+    )
+    unknown_count = (
+        int((master["client_status"] == "Unknown").sum()) if not master.empty else 0
+    )
+
+    try:
+        master.to_excel(path, index=False, engine="openpyxl")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not write client/project master: {exc}"
+        ) from exc
+
+    return len(master), exited_count, unknown_count
+
+
 def update_client_project_master(
     df: pd.DataFrame,
     snapshot_date: str,
@@ -1399,60 +1555,14 @@ def update_client_project_master(
     RuntimeError
         On write failure.
     """
-    path = output_dir / "icms_client_project_master.xlsx"
-
-    incoming = _strip_internal_cols(df).copy()
-    incoming = incoming.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
-
-    # Keep exit history cumulative so master rebuild remains order-independent.
-    update_exit_log_history(exit_df, snapshot_date, source_file_name, output_dir)
-
-    incoming_deduped = incoming.groupby(KEY_FIELDS, sort=False).last().reset_index()
-    incoming_key_set = set(
-        zip(
-            incoming_deduped["CHAMP ID"].astype(str),
-            incoming_deduped["ICMS Project Name"].astype(str),
-        )
-    ) if all(k in incoming_deduped.columns for k in KEY_FIELDS) else set()
-
-    if path.exists():
-        try:
-            existing_master = pd.read_excel(path, engine="openpyxl", dtype=str).fillna("")
-        except Exception:
-            existing_master = pd.DataFrame()
-    else:
-        existing_master = pd.DataFrame()
-
-    if (
-        not existing_master.empty
-        and all(k in existing_master.columns for k in KEY_FIELDS)
-    ):
-        existing_key_set = set(
-            zip(
-                existing_master["CHAMP ID"].astype(str),
-                existing_master["ICMS Project Name"].astype(str),
-            )
-        )
-    else:
-        existing_key_set = set()
-
-    new_count = len(incoming_key_set - existing_key_set)
-    returning_count = len(incoming_key_set & existing_key_set)
-    not_present_count = len(existing_key_set - incoming_key_set)
-
-    master = _build_master_from_histories(output_dir)
-    exited_count = int((master["client_status"] == "Exited").sum()) if not master.empty else 0
-    unknown_count = int((master["client_status"] == "Unknown").sum()) if not master.empty else 0
-
-    try:
-        master.to_excel(path, index=False, engine="openpyxl")
-    except Exception as exc:
-        raise RuntimeError(
-            f"Could not write client/project master: {exc}"
-        ) from exc
+    record_master_inputs(exit_df, snapshot_date, source_file_name, output_dir)
+    new_count, returning_count, not_present_count = compute_incoming_master_key_stats(
+        df, output_dir
+    )
+    master_total, exited_count, unknown_count = rebuild_client_project_master(output_dir)
 
     return (
-        len(master), new_count, returning_count, not_present_count,
+        master_total, new_count, returning_count, not_present_count,
         exited_count, unknown_count,
     )
 
