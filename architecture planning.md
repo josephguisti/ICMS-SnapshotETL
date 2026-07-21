@@ -130,7 +130,7 @@ Stored beside scripts. Persists recent UI/CLI settings (input/output dirs, sheet
 `CHAMP ID`, `ICMS Project Name`, `Date of Birth`, `First Name`, `Last Name`, `HMIS ID`, `Medi-Cal CIN`, `ICMS Check-In Date`, `ICMS Provider`, `PH Building Name`, `Current ICMS Status`, `ICMS Case Manager`, `ICMS Supervisor`, `ICMS Project Type`, `ICMS Slot #`, `Receiving Pre-Match ICMS?`, `Checked in 6+ Months and Not Yet Permanently Housed?`, `Permanent Housing Move-In Date`, `Housing Voucher Issued Date`, `Permanent Housing Subsidy`, `Service Planning Area`, `Household Size`, `PH Update Still Needed This Month?`, `5x5 Still Needed This Month?`, `HAI Still Needed This Month?`, `Care Plan Pending Action Step Still Needed This Month?`, `Care Plan Completed Action Step Still Needed This Month?`, `Eligible Services Still Needed This Month?`, `Housing Navigation Action Step Needed?`, `Health Care Action Step Needed?`, `Key Housing Milestone Data Needed?`
 
 ### Optional fields
-`ICMS Enrollment ID`, `ICMS Billing Rate`, `Permanently Housed?`, `Any Required Documentation Still Needed This Month?`, `Notification of Privacy Practices On Record?`, `Universal Sharing Consent Status`, `CalAIM CS Housing Navigation (HN) and Tenancy Sustaining Services (TSS) Verbal Opt-In Status Missing?`, `Family Billing Rate But Dependent Household Member(s) Not Listed in Household Composition?`, `Eligible Services Recorded for This Month`, `Universal Housing Application (UHA) Status`
+`ICMS Enrollment ID`, `ICMS Billing Rate`, `Permanently Housed?`, `Any Required Documentation Still Needed This Month?`, `Notification of Privacy Practices On Record?`, `Universal Sharing Consent Status`, `CalAIM CS Housing Navigation (HN) and Tenancy Sustaining Services (TSS) Verbal Opt-In Status Missing?`, `Family Billing Rate But Dependent Household Member(s) Not Listed in Household Composition?`, `Eligible Services Recorded for This Month`, `Universal Housing Application (UHA) Status`, `Most Recent Demographic Profile Update`, `Most Recent Household Composition Profile Update`, `Most Recent Medical Profile Update`, `Most Recent Legal Profile Update`, `Most Recent PH Update`, `Most Recent HMIS Universal Data Assessment`, `Most Recent HMIS Financial Assessment`, `Most Recent HMIS Barriers Assessment`, `Most Recent HMIS DV Assessment`, `Most Recent 5x5 Assessment`, `Most Recent Housing Acuity Index (HAI) Assessment`, `Most Recent Pending Action Step in the Care Plan`, `Most Recent Completed Action Step in the Care Plan`, `Most Recent Health Care Accompaniment`
 
 ### Master tracking fields
 `present_in_latest_snapshot`, `client_status`
@@ -148,7 +148,9 @@ Resolution order:
 3. user prompt for unresolved fields.
 
 Required unresolved fields require explicit user acknowledgment to continue.
-Optional unresolved fields may be skipped.
+Optional unresolved fields may be skipped; `reduce_to_approved_fields` still
+includes every approved field in the output, backfilling null for columns absent
+from the workbook (supports accretive vendor columns across snapshot vintages).
 
 GUI prompts are modal dialogs; CLI prompts are terminal-interactive.
 
@@ -252,12 +254,22 @@ Prerequisites:
 - Python environment with dependencies from `requirements.txt`.
 - `pyinstaller` installed (example: `python -m pip install pyinstaller`).
 
+Versioning:
+- Bump `__version__` in `version.py` before each release build.
+- The GUI window title and output EXE filename both include that version.
+
 Build command (from repo root):
 
 ```bash
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "ICMS Snapshot ETL" icms_gui.py
+python build_exe.py
+```
+
+Equivalent direct PyInstaller command:
+
+```bash
+python -m PyInstaller --noconfirm "ICMS Snapshot ETL.spec"
 ```
 
 Output:
-- executable at `dist/ICMS Snapshot ETL.exe`
-- build artifacts in `build/` and the generated `.spec` file.
+- executable at `dist/ICMS Snapshot ETL v<version>.exe` (example: `dist/ICMS Snapshot ETL v1.0.0.exe`)
+- build artifacts in `build/` and the checked-in `ICMS Snapshot ETL.spec` file.

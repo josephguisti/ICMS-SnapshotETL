@@ -1,5 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+
+sys.path.insert(0, SPECPATH)
+
+from version import __version__
+
+APP_NAME = f"ICMS Snapshot ETL v{__version__}"
 
 a = Analysis(
     ['icms_gui.py'],
@@ -22,7 +29,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ICMS Snapshot ETL',
+    name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -32,6 +32,7 @@ from update_icms_snapshot_files import (
     load_settings,
     save_settings,
 )
+from version import __version__
 
 # ── Optional dependencies ──────────────────────────────────────────────────────
 
@@ -595,7 +596,7 @@ class ICMSApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("ICMS Snapshot ETL")
+        self.title(f"ICMS Snapshot ETL v{__version__}")
         self.geometry("560x820")
         self.minsize(520, 640)
         self.resizable(False, True)

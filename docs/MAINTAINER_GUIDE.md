@@ -27,7 +27,9 @@ This guide is written for a successor who can use Cursor or another LLM but may 
 | `field_aliases.json` | Canonical field name → workbook column name (optional; created at runtime) | Survives vendor column renames; lives beside `icms_gui.py` when using GUI. |
 | `settings.json` | Last-used dirs, sheet names, publish toggle, etc. | Persisted by GUI via `load_settings` / `save_settings` from `update_icms_snapshot_files.py`. |
 | `requirements.txt` | Runtime deps: `openpyxl`, `pandas`, `msoffcrypto-tool`, `tkcalendar`, `keyring` | Version bumps can affect Excel I/O, dates, or optional GUI features. |
-| `ICMS Snapshot ETL.spec` | PyInstaller spec (one-file windowed EXE from `icms_gui.py`) | Packaging changes. |
+| `version.py` | Application version (`__version__`); used by GUI title, PyInstaller spec, and `build_exe.py` | Bump before each release EXE build. |
+| `build_exe.py` | Builds versioned EXE via PyInstaller spec | Preferred packaging entry point. |
+| `ICMS Snapshot ETL.spec` | PyInstaller spec (one-file windowed EXE from `icms_gui.py`; reads `version.py` for output name) | Packaging changes. |
 | `build/` | PyInstaller build artifacts (often git-ignored locally) | Regenerated on build; do not hand-edit. |
 | `.gitignore` | Ignores venv, `Outputs/`, several standard output filenames | Prevents committing generated data; extend if new outputs should stay private. |
 | `Sample input/`, `Sample output/` (if present) | Example workbooks / outputs | Manual regression; not wired to automated tests. |
@@ -38,7 +40,7 @@ This guide is written for a successor who can use Cursor or another LLM but may 
 
 ## 3. End-to-end workflow
 
-1. **Start:** `python icms_gui.py` (see `icms_gui.py` module docstring). PyInstaller build per `architecture planning.md`: `python -m PyInstaller ... icms_gui.py` → `dist/ICMS Snapshot ETL.exe`.
+1. **Start:** `python icms_gui.py` (see `icms_gui.py` module docstring). PyInstaller build per `architecture planning.md`: `python build_exe.py` → `dist/ICMS Snapshot ETL v<version>.exe`.
 2. **Setup panel (`ICMSApp`):** Pick one file (`Browse…`) or multiple (`Browse files…`). When **more than one** file is selected, the UI switches to **batch mode** (`len(self._batch_files) > 1`): per-file snapshot dates are edited in **inline rows** on the Setup panel (`_render_batch_date_rows`, `_collect_batch_dates`). Enter participant / vacant / exit / services **sheet names**, optional **password** (optional **keyring** save), output folder, and **“publish current dashboard file”** toggle.
 3. **Run:** `_on_run` validates, checks **duplicate imports** (`_load_integrated_file_keys`, `_find_duplicate_candidates`) and **services-table duplicate** heuristics (`_services_table_already_integrated`), then starts `_etl_worker` on a **background thread**.
 4. **Per file (`_process_one_file`):** `core.open_workbook` → list sheets → **participant:** `find_header_row` + `read_sheet` → **vacant/exit:** `read_sheet` + column subsets (GUI) → **services:** `read_services_log` → `_gui_resolve_fields` / `reduce_to_approved_fields` → duplicates → `update_dashboard_flatfile` (if enabled) → `update_snapshot_history` → `update_client_project_master` (which calls `update_exit_log_history` inside) → step 7: `summarize_services_overlap`, `update_services_log_history`, optional `append_duplicate_warning`, `append_ingest_log`.
@@ -150,7 +152,7 @@ This guide is written for a successor who can use Cursor or another LLM but may 
 | Logging / ingest diagnostics | New KPI | `log_row` construction in `icms_gui.py` | Low | Many `*-diag` columns—Tableau may ignore. |
 | Sample / test data | Regression | `Sample input/` etc. | Low | No automated `pytest` in repo. |
 | Dependencies | Security / compat | `requirements.txt` | Medium | Pin versions if production needs stability. |
-| Packaging | EXE distribution | `ICMS Snapshot ETL.spec`, PyInstaller cmd in architecture doc | Medium | Test EXE on clean VM; see §14 for path behavior. |
+| Packaging | EXE distribution | `version.py`, `build_exe.py`, `ICMS Snapshot ETL.spec` | Medium | Bump `__version__` before release; test EXE on clean VM; see §14 for path behavior. |
 
 ---
 
@@ -178,7 +180,7 @@ Use **`architecture planning.md`** as the behavioral contract, and the files bel
 | Change GUI text / steps | `icms_gui.py` labels, `_STEP_LABELS` | Copy-only diff | N/A |
 | Improve error messages | `icms_gui._process_one_file` exception paths; `open_workbook` | Clear, non-leaky messages | Show sample to end user. |
 | Add logging field to ingest | `icms_gui.py` `log_row` dict | Add column with safe string conversion | CSV consumers tolerate new column. |
-| Packaging / PyInstaller | `ICMS Snapshot ETL.spec`, `architecture planning.md` §Build | Rebuild; document command | Run EXE from §13. |
+| Packaging / PyInstaller | `version.py`, `build_exe.py`, `ICMS Snapshot ETL.spec`, `architecture planning.md` §Build | Bump version, rebuild; document command | Run EXE from §13. |
 | Troubleshoot failed run | Last `icms_ingest_log.csv` row; GUI log; `architecture planning.md` workflow | Trace exception to function | Reproduce on sample workbook. |
 | Tableau mismatch | Output writers + field catalogue docs | Map Tableau field to code column | Validate in Tableau, not only in code. |
 
