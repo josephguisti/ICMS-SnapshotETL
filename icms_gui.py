@@ -611,6 +611,7 @@ class ICMSApp(tk.Tk):
         self._batch_date_rows: List[dict] = []
         self._last_skipped_duplicates: List[Tuple[Path, str]] = []
         self._last_skipped_services_duplicates: List[Tuple[Path, str]] = []
+        self._last_input_dir: str = ""
 
         self._configure_styles()
 
@@ -1045,6 +1046,12 @@ class ICMSApp(tk.Tk):
     def _load_initial_state(self):
         settings = load_settings(self._script_dir)
 
+        # Remembered input-file browse location (folder only; no file to
+        # prefill until the user picks one).
+        saved_input_dir = settings.get("last_input_dir", "")
+        if saved_input_dir and Path(saved_input_dir).is_dir():
+            self._last_input_dir = saved_input_dir
+
         # Output folder
         saved_out = settings.get("last_output_dir", "")
         if saved_out and Path(saved_out).is_dir():
@@ -1197,12 +1204,23 @@ class ICMSApp(tk.Tk):
 
     # ── Browse ─────────────────────────────────────────────────────────────────
 
+    def _update_settings(self, **kwargs) -> None:
+        """Merge *kwargs* into settings.json without clobbering other keys."""
+        settings = load_settings(self._script_dir)
+        settings.update(kwargs)
+        save_settings(settings, self._script_dir)
+
+    def _remember_input_dir(self, path: str) -> None:
+        """Record *path*'s parent folder as the last-used input directory."""
+        self._last_input_dir = str(Path(path).parent.resolve())
+        self._update_settings(last_input_dir=self._last_input_dir)
+
     def _on_browse_file(self):
         self._batch_files = []
         self._batch_info_lbl.config(text="")
         self._set_date_mode(False)
         cur = self._file_var.get()
-        init = str(Path(cur).parent) if cur else str(Path.home())
+        init = str(Path(cur).parent) if cur else (self._last_input_dir or str(Path.home()))
         path = filedialog.askopenfilename(
             title="Select ICMS Snapshot",
             initialdir=init,
@@ -1211,10 +1229,11 @@ class ICMSApp(tk.Tk):
         if path:
             self._file_var.set(path)
             self._auto_fill_from_file(path)
+            self._remember_input_dir(path)
 
     def _on_browse_files(self):
         cur = self._file_var.get()
-        init = str(Path(cur).parent) if cur else str(Path.home())
+        init = str(Path(cur).parent) if cur else (self._last_input_dir or str(Path.home()))
         paths = filedialog.askopenfilenames(
             title="Select Multiple ICMS Snapshots",
             initialdir=init,
@@ -1222,6 +1241,7 @@ class ICMSApp(tk.Tk):
         )
         if not paths:
             return
+        self._remember_input_dir(paths[0])
         if len(paths) == 1:
             self._batch_files = []
             self._batch_info_lbl.config(text="")
@@ -1467,6 +1487,7 @@ class ICMSApp(tk.Tk):
         )
         if path:
             self._folder_var.set(path)
+            self._update_settings(last_output_dir=path)
 
     # ── Run ────────────────────────────────────────────────────────────────────
 
