@@ -13,3 +13,10 @@ icms_snapshot_history.csv
 icms_client_project_master.xlsx
 icms_ingest_log.csv
 icms_duplicate_client_project_warning.csv
+
+# Local runtime state (persists per-machine; should not be shared via git)
+settings.json
+
+# Manual regression sample workbooks (large binaries, not automated tests)
+Sample input/
+Sample output/
