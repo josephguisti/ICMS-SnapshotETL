@@ -138,6 +138,31 @@ SERVICES_LOG_FIELDS: List[str] = [
 
 KEY_FIELDS: List[str] = ["CHAMP ID", "ICMS Project Name"]
 
+# Calendar-date columns. Excel writers emit real date cells (not ISO text);
+# CSV writers persist YYYY-MM-DD and never the pandas token "NaT".
+# reporting_month (YYYY-MM) is intentionally excluded — it is not a date.
+DATE_FIELDS: List[str] = (
+    [
+        "snapshot_date",
+        "Date of Birth",
+        "ICMS Check-In Date",
+        "Permanent Housing Move-In Date",
+        "Housing Voucher Issued Date",
+    ]
+    + MOST_RECENT_FIELDS
+    + [
+        "Check-In Date",
+        "Check-Out Date",
+        "Move-In Date",
+        "Move-Out Date",
+        "Service Date",
+        "Service Record Created Date",
+    ]
+)
+
+_EXCEL_DATE_FORMAT = "YYYY-MM-DD"
+_NULL_STRING_VALUES = {"nan": "", "None": "", "<NA>": "", "NaT": "", "NaN": ""}
+
 ALIASES_FILENAME = "field_aliases.json"
 
 # Columns written to the duplicate warning file
@@ -171,6 +196,68 @@ def _strip_internal_cols(df: pd.DataFrame) -> pd.DataFrame:
         columns=[c for c in df.columns if str(c).startswith("_")],
         errors="ignore",
     )
+
+
+def _parse_date_series(series: pd.Series) -> pd.Series:
+    """Parse a column to datetime64[ns]; blanks, 'NaT', and junk become NaT."""
+    return pd.to_datetime(series, errors="coerce")
+
+
+def _format_date_columns_iso(df: pd.DataFrame) -> pd.DataFrame:
+    """Persist date columns as YYYY-MM-DD strings; missing values as ''."""
+    out = df.copy()
+    for col in DATE_FIELDS:
+        if col not in out.columns:
+            continue
+        parsed = _parse_date_series(out[col])
+        formatted = parsed.dt.strftime("%Y-%m-%d")
+        out[col] = formatted.where(parsed.notna(), "")
+    return out
+
+
+def _stringify_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Stringify a frame for CSV history: ISO dates, null tokens as ''."""
+    out = _format_date_columns_iso(df)
+    return out.astype(str).replace(_NULL_STRING_VALUES)
+
+
+def _write_excel(df: pd.DataFrame, path: Path) -> None:
+    """Write ``df`` to ``path`` with DATE_FIELDS stored as Excel dates.
+
+    pandas ``to_excel`` writes Python strings as Excel text. US Excel will
+    not treat ISO ``YYYY-MM-DD`` text as dates, and Format Cells → Date
+    cannot convert text. Parsing to date objects before write stores real
+    date serials so AutoFilter date grouping works.
+    """
+    out = df.copy()
+    date_col_names: List[str] = []
+    for col in DATE_FIELDS:
+        if col not in out.columns:
+            continue
+        parsed = _parse_date_series(out[col])
+        # Python date objects (not midnight datetimes) so Excel uses a
+        # date number format instead of YYYY-MM-DD HH:MM:SS.
+        out[col] = [ts.date() if pd.notna(ts) else None for ts in parsed]
+        date_col_names.append(col)
+
+    with pd.ExcelWriter(
+        path,
+        engine="openpyxl",
+        date_format=_EXCEL_DATE_FORMAT,
+        datetime_format=_EXCEL_DATE_FORMAT,
+    ) as writer:
+        out.to_excel(writer, index=False)
+        ws = writer.book.active
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        for col_name in date_col_names:
+            if col_name not in headers:
+                continue
+            idx = headers.index(col_name) + 1
+            for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+                cell = row[0]
+                if cell.value is None or cell.value == "":
+                    cell.value = None
+                cell.number_format = _EXCEL_DATE_FORMAT
 
 
 # ── Workbook opening ──────────────────────────────────────────────────────────
@@ -908,7 +995,7 @@ def update_dashboard_flatfile(
         combined = out
 
     try:
-        combined.to_excel(path, index=False, engine="openpyxl")
+        _write_excel(combined, path)
     except Exception as exc:
         raise RuntimeError(f"Could not write dashboard flat file: {exc}") from exc
 
@@ -934,8 +1021,7 @@ def update_snapshot_history(
         On write failure.
     """
     path = output_dir / "icms_snapshot_history.csv"
-    clean_df = _strip_internal_cols(df).copy()
-    clean_df = clean_df.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+    clean_df = _stringify_frame(_strip_internal_cols(df))
 
     if path.exists():
         try:
@@ -950,7 +1036,7 @@ def update_snapshot_history(
     else:
         existing = pd.DataFrame()
 
-    combined = pd.concat([existing, clean_df], ignore_index=True)
+    combined = _stringify_frame(pd.concat([existing, clean_df], ignore_index=True))
 
     try:
         combined.to_csv(path, index=False, encoding="utf-8")
@@ -983,8 +1069,7 @@ def update_exit_log_history(
                 return 0
         return 0
 
-    clean_exit = _strip_internal_cols(exit_df).copy()
-    clean_exit = clean_exit.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+    clean_exit = _stringify_frame(_strip_internal_cols(exit_df))
     clean_exit.insert(0, "source_file_name", source_file_name)
     clean_exit.insert(0, "reporting_month", snapshot_date[:7])
     clean_exit.insert(0, "snapshot_date", snapshot_date)
@@ -1011,7 +1096,9 @@ def update_exit_log_history(
     else:
         existing = pd.DataFrame()
 
-    combined = pd.concat([existing, clean_exit], ignore_index=True, sort=False)
+    combined = _stringify_frame(
+        pd.concat([existing, clean_exit], ignore_index=True, sort=False)
+    )
     try:
         combined.to_csv(path, index=False, encoding="utf-8")
     except Exception as exc:
@@ -1117,8 +1204,7 @@ def update_services_log_history(
                 metrics["services_log_history_total_rows"] = 0
         return metrics
 
-    incoming = _strip_internal_cols(services_df).copy()
-    incoming = incoming.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+    incoming = _stringify_frame(_strip_internal_cols(services_df))
     incoming.insert(0, "source_file_name", source_file_name)
     incoming.insert(0, "reporting_month", snapshot_date[:7])
     incoming.insert(0, "snapshot_date", snapshot_date)
@@ -1141,7 +1227,9 @@ def update_services_log_history(
     else:
         existing = pd.DataFrame()
 
-    combined = pd.concat([existing, incoming], ignore_index=True, sort=False)
+    combined = _stringify_frame(
+        pd.concat([existing, incoming], ignore_index=True, sort=False)
+    )
     if combined.empty:
         return metrics
 
@@ -1163,7 +1251,7 @@ def update_services_log_history(
         blank_mask = ph_building.str.strip().eq("")
         deduped.loc[blank_mask, "PH Building Name"] = "Scattered Site"
     try:
-        deduped.to_csv(path, index=False, encoding="utf-8")
+        _stringify_frame(deduped).to_csv(path, index=False, encoding="utf-8")
     except Exception as exc:
         raise RuntimeError(f"Could not write services log history: {exc}") from exc
 
@@ -1454,8 +1542,7 @@ def compute_incoming_master_key_stats(
     """Return ``(new_rows, returning_rows, not_present_count)`` vs existing master."""
     path = output_dir / "icms_client_project_master.xlsx"
 
-    incoming = _strip_internal_cols(df).copy()
-    incoming = incoming.astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+    incoming = _stringify_frame(_strip_internal_cols(df))
 
     incoming_deduped = incoming.groupby(KEY_FIELDS, sort=False).last().reset_index()
     incoming_key_set = set(
@@ -1509,11 +1596,11 @@ def rebuild_client_project_master(output_dir: Path) -> Tuple[int, int, int]:
     )
 
     try:
-        master.to_excel(path, index=False, engine="openpyxl")
-    except Exception as exc:
+        _write_excel(master, path)
+    except Exception as extra:
         raise RuntimeError(
-            f"Could not write client/project master: {exc}"
-        ) from exc
+            f"Could not write client/project master: {extra}"
+        ) from extra
 
     return len(master), exited_count, unknown_count
 
@@ -1636,10 +1723,8 @@ def append_duplicate_warning(
     else:
         existing = pd.DataFrame()
 
-    clean_warn = warning_df.astype(str).replace(
-        {"nan": "", "None": "", "<NA>": ""}
-    )
-    combined = pd.concat([existing, clean_warn], ignore_index=True)
+    clean_warn = _stringify_frame(warning_df)
+    combined = _stringify_frame(pd.concat([existing, clean_warn], ignore_index=True))
 
     try:
         combined.to_csv(path, index=False, encoding="utf-8")
