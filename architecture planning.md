@@ -2,274 +2,197 @@
 
 ## What this application is
 
-A Python ETL tool for weekly DHS/HSH ICMS snapshot workbooks. The production path is the Tkinter GUI, which normalizes varying source workbooks and maintains cumulative historical outputs plus a deterministic master file.
+A Python ETL tool for DHS/HSH ICMS snapshot workbooks. The production path is the Tkinter GUI. It reads each workbook's supported tabs through a director-maintained catalogue, keeps cumulative histories, and rebuilds a deterministic enrollment-level master from those histories.
 
 Codebase:
-- `icms_etl_core.py` — reusable ETL logic.
-- `icms_gui.py` — desktop GUI runner.
-- `update_icms_snapshot_files.py` — legacy/development CLI runner (not required for normal operations).
+- `icms_catalogue.py` — the only definition of output fields, accepted vendor header names, supported tabs, and reviewed exclusions.
+- `icms_etl_core.py` — all ETL logic. `run_snapshot_files` is the single entry point for every run.
+- `icms_gui.py` — desktop GUI. Collects choices, shows progress and results; contains no import logic.
+- `update_icms_snapshot_files.py` — CLI over the same entry point (development/backup use).
+- `tests/` — focused regression tests (`python -m pytest tests -p no:cacheprovider`).
 
 ---
 
-## GUI-first operating workflow
+## Operating cadence
 
-For ongoing use, the intended day-to-day path is the GUI (`icms_gui.py`), not the CLI.
+Import a snapshot **weekly**, and additionally import a snapshot **generated on the last day of each month**.
+
+- A snapshot's Exit Log appears to cover the current service month. The app's exit history keeps every exit it has observed across imports, so exits survive after they roll off the vendor's tab.
+- A month-end snapshot only contains records entered before it was generated. Late or backdated exits can still be missing; those enrollments stay **Unknown**. Nobody needs to intervene, and the app never invents exit dates.
+- An exit that disappears from a later Exit Log is **not** treated as reversed. An enrollment that reappears in a participant snapshot becomes Active by the status rule below; absence alone proves nothing.
+
+---
+
+## GUI workflow
 
 ### Start and run
-- Launch with `python icms_gui.py`.
-- Choose one file (`Browse...`) for routine weekly updates, or many files (`Browse files...`) for historical backfill.
-- Pick/confirm snapshot date(s), confirm participant/vacant/exit sheet names, and choose output folder.
+- Launch with `python icms_gui.py` or the EXE.
+- `Browse…` for one workbook (weekly), `Browse files…` for several (backfill or repair).
+- Snapshot dates fill in automatically (see "Snapshot dates"). Override any date by typing over it.
+- Choose the output folder and run. No field-mapping questions are ever asked.
 
-### Typical weekly run (single file)
-- Keep the dashboard publish toggle enabled.
-- Run one latest workbook.
-- Result: dashboard flatfile, snapshot history, exit-log history, master, warnings/logs updated.
+### Already-imported files
+Before a run, the app checks the output folder for files already imported (same file name + snapshot date, from snapshot history and successful ingest-log rows). If any are found, one dialog offers:
+- **Reprocess all selected** — re-import them; their stored rows are replaced with freshly read values. This is how historical data is repaired.
+- **Skip already-imported** — shown only when some selected files are new.
+- **Cancel**.
 
-### Historical backfill (multi-file batch)
-- Select all historical files together, then confirm/correct parsed dates.
-- Let the app process oldest to newest.
-- Recommended: enable dashboard publish only for the newest intended current file.
-- Result: histories and deterministic master are built progressively even when files vary.
+### Dashboard publish toggle
+- Single file: the toggle decides whether this file becomes the current dashboard flatfile.
+- Batch: with the toggle on, only the newest **successful** file is published, and only if it is not older than a snapshot already in history. With the toggle off, the dashboard is left as is.
 
-### Safety features in GUI
-- Duplicate-import warning before run (`source_file_name + snapshot_date`) with include/exclude options.
-- Services-table-level duplicate-import warning when an incoming `Services Log` table appears already integrated (bypassable include/exclude/cancel).
-- Missing `Vacant Slots` / `Exit Log` sheets are warnings, not hard failures.
-- Missing `Services Log` sheet is a warning, not a hard failure.
-- Alias prompts are modal dialogs; saved aliases reduce repeated mapping work.
-
-### CLI status
-- CLI remains in the repo for development/backward compatibility.
-- Ongoing operational use is GUI-first.
+### Results panel
+Shows per-file outcomes, dashboard source, master counts, backup location, any tab that was not imported, and the grouped **structural findings**. "Copy findings for director" copies the findings as plain text. If any tab was not imported the status reads "Run complete with gaps" instead of "Run complete".
 
 ---
 
 ## Input model
 
-Each run processes one workbook (`.xlsx`), optionally encrypted.
+Each workbook (`.xlsx`, optionally password-protected; decrypted in memory) supplies up to four data tabs. Nothing else is imported.
 
-Primary sheet categories:
-1. **Participant sheet** (user-configurable; typically `Participant Level Summary`)
-2. **Vacant slots sheet** (user-configurable; typically `Vacant Slots`)
-3. **Exit log sheet** (user-configurable; typically `Exit Log`)
-4. **Services log sheet** (user-configurable; typically `Services Log`)
+| Category | Accepted tab names | If missing |
+|---|---|---|
+| Participant | `Participant Level Summary` (or the name typed in Setup) | File fails; nothing from it is written. |
+| Vacant | `Vacant Slots` | Reported (from 2026-04-08 on); file continues. |
+| Exit | `Exit Log` | Reported; file continues. |
+| Services | `Service Log`, `Services Log` (both always accepted) | Reported; file continues. |
 
-Header handling:
-- Participant sheet supports multi-row vendor headers through automatic header-row detection (`find_header_row`).
-- Vacant/exit sheets are read as standard single-header rows.
+`Generated On` is read for the snapshot date only.
+
+Tab names are matched after trimming, collapsing whitespace, and ignoring case. If a workbook contains two candidate tabs for one category that differ, neither is imported and the gap is reported; identical copies are harmless.
+
+### Header resolution (per workbook, per tab)
+- The header row is detected within the first five rows by overlap with accepted names.
+- Each header is matched to an output field if it equals the output name or one of the field's accepted vendor names, after the same whitespace/case normalization. No fuzzy matching.
+- Two accepted names for one field may coexist. The first non-blank value in catalogue order is kept. If they disagree, a finding is recorded. If they disagree on an **essential** identity field, the tab is not imported (participant: the file fails) rather than risk misattributing records.
+- Headers outside the catalogue and its reviewed-exclusion list are reported as **unfamiliar** and never exported.
+- A missing non-essential field becomes blank and is reported once per run, except fields marked retired, absent by design, or not yet introduced for that snapshot's date.
+- Essential fields: participant `CHAMP ID`, `ICMS Project Name`, `ICMS Enrollment ID`; exit the same three; vacant `ICMS Project Name`; services `CHAMP ID`. A participant tab missing one of these fails that file. Other tabs missing one are skipped for that file.
+- Identifiers (`CHAMP ID`, `ICMS Enrollment ID`) are normalized as text: `100300.0`, `100300`, and `"100300 "` all become `100300`.
+- Participant rows with a blank `CHAMP ID` or `ICMS Project Name` are dropped and counted. Rows with a blank enrollment ID are kept as their own blank-enrollment key and reported.
+
+### Snapshot dates
+- Default: the date in the workbook's `Generated On` tab, found by locating the "Generated On" label (not a fixed cell).
+- Fallback: `MM.DD.YYYY` in the filename.
+- When both exist and disagree, the Setup panel shows both next to that file's date. The selected date and its origin (`Generated On`, `filename`, or `manual entry`) are written to the ingest log, along with both candidate dates.
+- Already-stored records keep the dates they were imported with unless that file is reprocessed.
 
 ---
 
 ## Output files
 
-All outputs are written to one selected output folder.
+Field names and column order for every output come from `icms_catalogue.py`. Metadata columns `snapshot_date`, `reporting_month` (`YYYY-MM`), and `source_file_name` lead every history. Columns found in older stored files but no longer in the catalogue are kept at the end.
 
 ### `icms_current_dashboard_flatfile.xlsx`
-**Grain:** one row per ICMS slot (participant or vacant placeholder).
-
-- Participant rows: approved fields + metadata (`snapshot_date`, `reporting_month`, `source_file_name`), `is_vacant_slot=False`.
-- Vacant rows: available vacant-sheet fields + metadata, participant fields null, `is_vacant_slot=True`.
-- Overwritten when dashboard publish is enabled for a run.
+**Grain:** one row per ICMS slot for the published snapshot (participants plus vacant placeholders).
+- Columns: metadata, every participant output field, `is_vacant_slot`, `# Days Vacant`.
+- Vacant rows carry the vacant fields and blank participant fields.
+- Written only when publishing (see toggle rules). Date columns are real Excel dates.
 
 ### `icms_snapshot_history.csv`
-**Grain:** one participant enrollment row per `snapshot_date`.
-
-- Participant rows only (no vacant placeholders).
-- Same-date reload is idempotent (existing same `snapshot_date` rows replaced).
+**Grain:** one participant row per enrollment per `snapshot_date`.
+- Reprocessing a date replaces every row for that `snapshot_date`.
+- Sorted by snapshot date then source file, so import order never changes the file.
 
 ### `icms_exit_log_history.csv`
-**Grain:** exit-log rows with `snapshot_date` + `source_file_name`.
-
-- Cumulative exit-history store.
-- Same source/date reruns replace previously written rows for that source/date pair.
+**Grain:** one exit row per enrollment per imported file.
+- Reprocessing a file replaces its rows (same `source_file_name` + `snapshot_date`). Rows from other files are untouched.
+- A file whose Exit Log is empty or not imported leaves history unchanged.
 
 ### `icms_services_log_history.csv`
-**Grain:** one deduplicated service event row.
-
-- Cumulative services-history store built from `Services Log`.
-- Metadata added per ingest (`snapshot_date`, `reporting_month`, `source_file_name`).
-- Order-independent deduplication:
-  - Primary event key: `Service ID` (when present/nonblank).
-  - Fallback key: `CHAMP ID + ICMS Enrollment ID + Service + Place of Service + Service Date + Service Record Created Date`.
-- Deterministic representative row per event key is preserved by earliest `snapshot_date` then `source_file_name`.
-- Historical backfill can run in any order without duplicating service events.
+**Grain:** one row per service event.
+- Event key: `Service ID` when present; otherwise `CHAMP ID | ICMS Enrollment ID | Service | Place of Service | Service Date | Service Record Created Date`. Keys are computed after header resolution.
+- If a fallback row has a blank `Service`, it borrows the single non-blank `Service` seen for the same remaining components. This lets damaged rows (written when the vendor renamed the column) merge with their repaired copies instead of duplicating.
+- Reprocessing a file first removes rows previously stored from that file + date. Then per event key, each column takes the earliest snapshot's non-blank value. A corrected reimport therefore replaces its own old values, and a blank never hides a value another snapshot supplied.
+- Blank `PH Building Name` is stored as `Scattered Site`.
 
 ### `icms_client_project_master.xlsx`
-**Grain:** one row per `CHAMP ID + ICMS Project Name`.
+**Grain:** one row per **`CHAMP ID` + `ICMS Project Name` + `ICMS Enrollment ID`**. The filename is unchanged.
 
-Current behavior is **deterministic and order-independent**:
-- Rebuilt from full `icms_snapshot_history.csv` (+ `icms_exit_log_history.csv`) each run.
-- Latest participant values are chosen by max `snapshot_date`.
-- `present_in_latest_snapshot` is based on membership in the global latest snapshot.
-- `client_status` derived as:
-  - `Active` if present in latest participant snapshot
-  - `Exited` if absent from latest participant snapshot and exit history exists
-  - `Unknown` otherwise
-- Exit fields are populated from latest relevant exit-history row.
+Rebuilt from the full snapshot and exit histories on every run:
+- Participant values come from that enrollment's latest participant observation.
+- Exit columns come from that enrollment's latest exit observation (latest snapshot, then latest check-out/move-out date). Blank participant fields are filled from the exit row.
+- Enrollments seen only in exit history are included.
+- `present_in_latest_snapshot` is True when the enrollment appears in the latest imported participant snapshot.
+- `client_status`, per enrollment:
+  - `Active` — in the latest participant snapshot.
+  - `Exited` — not in it, with a matching exit recorded.
+  - `Unknown` — previously observed, not in it, no matching exit.
+- A new enrollment for the same client and project is a separate row and never overwrites an older enrollment's values or status. Service events never establish enrollment or exit.
+- If a stored history lacks `ICMS Enrollment ID` entirely, the rebuild stops with a message instead of falling back to client + project.
 
 ### `icms_ingest_log.csv`
-One row per run (`snapshot_date` replaced on rerun). Tracks key counts, status, and notes.
+One row per `snapshot_date` (replaced on rerun), including failed attempts (`run_status = failed`). It records:
+- counts;
+- the date and its origin, plus the Generated On and filename dates;
+- the tabs used;
+- `skipped_categories`;
+- `structural_findings`, the grouped findings as one line;
+- whether the dashboard was published.
 
 ### `icms_duplicate_client_project_warning.csv`
-Rows involved in same-snapshot duplicate `CHAMP ID + ICMS Project Name` keys.
+Participant rows that share all three enrollment-key fields within one snapshot. Reprocessing a date replaces that date's rows.
 
-### `field_aliases.json`
-Stored beside scripts. Persists canonical field → workbook column mappings.
+### `backups/`
+Before a run that reprocesses already-imported files, and before the first run that upgrades outputs written by an earlier release, the app copies every existing output file to `backups/<timestamp> <reason>/` inside the output folder. Nothing else needs to be managed; old backup folders can be deleted when no longer wanted.
+
+### `icms_output_format.txt`
+Records the output format version so the one-time upgrade backup happens once.
 
 ### `settings.json`
-Stored beside scripts. Persists recent UI/CLI settings (input/output dirs, sheet names).
+Stored beside the scripts. Last-used folders and tab names.
 
 ---
 
-## Approved field catalogue
+## Failure and transaction rules
 
-### Metadata fields
-`snapshot_date`, `reporting_month`, `source_file_name`
-
-### Required fields
-`CHAMP ID`, `ICMS Project Name`, `Date of Birth`, `First Name`, `Last Name`, `HMIS ID`, `Medi-Cal CIN`, `ICMS Check-In Date`, `ICMS Provider`, `PH Building Name`, `Current ICMS Status`, `ICMS Case Manager`, `ICMS Supervisor`, `ICMS Project Type`, `ICMS Slot #`, `Receiving Pre-Match ICMS?`, `Checked in 6+ Months and Not Yet Permanently Housed?`, `Permanent Housing Move-In Date`, `Housing Voucher Issued Date`, `Permanent Housing Subsidy`, `Service Planning Area`, `Household Size`, `PH Update Still Needed This Month?`, `5x5 Still Needed This Month?`, `HAI Still Needed This Month?`, `Care Plan Pending Action Step Still Needed This Month?`, `Care Plan Completed Action Step Still Needed This Month?`, `Eligible Services Still Needed This Month?`, `Housing Navigation Action Step Needed?`, `Health Care Action Step Needed?`, `Key Housing Milestone Data Needed?`
-
-### Optional fields
-`ICMS Enrollment ID`, `ICMS Billing Rate`, `Permanently Housed?`, `Any Required Documentation Still Needed This Month?`, `Notification of Privacy Practices On Record?`, `Universal Sharing Consent Status`, `CalAIM CS Housing Navigation (HN) and Tenancy Sustaining Services (TSS) Verbal Opt-In Status Missing?`, `Family Billing Rate But Dependent Household Member(s) Not Listed in Household Composition?`, `Eligible Services Recorded for This Month`, `Universal Housing Application (UHA) Status`, `Most Recent Demographic Profile Update`, `Most Recent Household Composition Profile Update`, `Most Recent Medical Profile Update`, `Most Recent Legal Profile Update`, `Most Recent PH Update`, `Most Recent HMIS Universal Data Assessment`, `Most Recent HMIS Financial Assessment`, `Most Recent HMIS Barriers Assessment`, `Most Recent HMIS DV Assessment`, `Most Recent 5x5 Assessment`, `Most Recent Housing Acuity Index (HAI) Assessment`, `Most Recent Pending Action Step in the Care Plan`, `Most Recent Completed Action Step in the Care Plan`, `Most Recent Health Care Accompaniment`
-
-### Master tracking fields
-`present_in_latest_snapshot`, `client_status`
-
-### Exit fields
-`Check-In Date`, `Check-Out Date`, `Move-In Date`, `Move-Out Date`, `Exit Reason`, `Exit Destination`, `Exit Location`, `Transferred to New Provider Within ICMS Program?`, `New ICMS Provider`
+- Everything is read and validated before anything is written.
+- All writes for one file happen as a unit. If any write fails, every output file is restored to its state before that file.
+- A failed file is logged, listed in Results, and never published. Other files in a batch continue.
+- Files run oldest first (snapshot date, then filename) whatever order they were selected in. The master is rebuilt once at the end of a batch.
+- Stored histories that cannot be read stop the run; they are never silently started over.
 
 ---
 
-## Field resolution and aliases
+## Structural findings
 
-Resolution order:
-1. exact canonical column name,
-2. saved alias from `field_aliases.json`,
-3. user prompt for unresolved fields.
+Findings are maintenance information for the director, not questions for the analyst. They are grouped across a batch (one line per finding with the number of affected files) and appear in the Results panel, the run log, and the ingest log.
 
-Required unresolved fields require explicit user acknowledgment to continue.
-Optional unresolved fields may be skipped; `reduce_to_approved_fields` still
-includes every approved field in the output, backfilling null for columns absent
-from the workbook (supports accretive vendor columns across snapshot vintages).
+| Finding | Meaning |
+|---|---|
+| File not imported: essential column missing / conflicting identity columns | Participant identity could not be read safely. |
+| Tab not imported | A non-participant tab lacked an essential column. |
+| Supported tab not found / several candidate tabs differ | A data category is absent for that file. |
+| Unfamiliar tab / unfamiliar column | Not in the catalogue or the reviewed exclusions; not imported. |
+| Expected column missing | A current catalogue field was absent; left blank. |
+| Two accepted column names both present and disagree | First in catalogue order kept. |
+| Participant rows with blank ICMS Enrollment ID | Kept, reported. |
+| Snapshot date differs from Generated On or filename | Shows all three dates. |
+| Generated On date not found | Filename or manual date used. |
 
-GUI prompts are modal dialogs; CLI prompts are terminal-interactive.
+The reviewed exclusions seeded from the 02.18, 04.30, 05.19, 07.07, and 10.19.2026 samples mean those workbooks produce no unfamiliar-header findings.
 
 ---
 
-## CLI behavior (`update_icms_snapshot_files.py`)
+## CLI (`update_icms_snapshot_files.py`)
 
-### Single-file mode
 ```bash
-python update_icms_snapshot_files.py \
-  --input "ICMS Snapshot - 01.28.2026.xlsx" \
-  --snapshot-date 2026-01-28 \
-  --sheet "Participant Level Summary"
+python update_icms_snapshot_files.py --input "ICMS Snapshot - 10.19.2026.xlsx"
+python update_icms_snapshot_files.py --batch "./snapshots" --output-dir "./output" --reprocess
 ```
 
-### Batch mode
-```bash
-python update_icms_snapshot_files.py \
-  --batch "./snapshots" \
-  --output-dir "./output"
-```
-
-CLI batch:
-- scans folder for `.xlsx`,
-- parses date from filename (`MM.DD.YYYY`),
-- confirms/corrects dates interactively,
-- processes oldest→newest,
-- continues when individual files fail.
-
-Additional CLI features:
-- startup settings display,
-- snapshot-date-gap warning (>45 days),
-- settings persistence after runs.
-
----
-
-## GUI behavior (`icms_gui.py`)
-
-Single-window app with 3 panels (Setup → Run → Results), background worker thread, queue-based UI updates.
-
-### Setup panel
-- Single-file picker (`Browse…`) and multi-file picker (`Browse files…`).
-- Batch file summary display.
-- Snapshot date input (disabled in multi-file mode; dates come from batch confirmation).
-- Editable sheet names (participant, vacant, exit, services).
-- Password input with optional keyring save/load.
-- Output folder picker.
-- Run behavior toggle: publish current dashboard file on/off.
-- Inline validation.
-
-### Batch confirmation
-- Modal list of selected files with parsed dates.
-- Date correction in `YYYY-MM-DD`.
-- Requires valid date for every file.
-- Sorts processing oldest→newest.
-
-### Duplicate-import warning / exclusion
-Before ingest, GUI checks selected output folder history for already integrated tuples:
-- match key: `source_file_name + snapshot_date`.
-- sources: `icms_snapshot_history.csv` (primary), successful `icms_ingest_log.csv` rows (secondary).
-
-Single-file:
-- warns and asks user to cancel or continue.
-
-Batch:
-- lists duplicates and allows:
-  - exclude flagged files (recommended),
-  - include all,
-  - cancel batch.
-- handles “all excluded” safely by stopping run.
-
-Services table-level duplicate warning (separate from file/date warning):
-- compares incoming `Services Log` event keys against `icms_services_log_history.csv`.
-- warns only when the incoming table appears already integrated (high overlap and/or same file+date already present).
-- does **not** warn for expected row-level duplicate service events.
-
-### Run panel
-- 7-step progress indicator.
-- live log stream.
-- resilient per-file behavior in batch (continue on file failure).
-- missing vacant/exit/services sheets are warnings, not hard failures.
-
-### Batch dashboard publish rule
-- In batch mode, dashboard flatfile publishes only for newest snapshot in confirmed batch.
-- Earlier files in batch update history/master but do not overwrite dashboard file.
-
-### Results panel
-- Single-file: detailed run summary.
-- Batch: files processed/succeeded/failed, dashboard source file, per-file outcomes.
-- Includes skipped-duplicate reporting for file/date and services-table duplicate exclusions when applicable.
-- Clickable output folder link.
-
-### UX style
-Warm off-white palette, muted accent color, flat controls, generous spacing, fixed-width design with vertical scrolling support in Setup.
+Same pipeline and outputs as the GUI. Dates default from `Generated On`; `--snapshot-date` overrides in single-file mode, and batch mode lists the dates for correction before running. Options: `--sheet` (participant tab name), `--no-publish`, `--reprocess`. Prompts once for a password if any file is encrypted.
 
 ---
 
 ## Build Windows EXE
 
-Prerequisites:
-- Python environment with dependencies from `requirements.txt`.
-- `pyinstaller` installed (example: `python -m pip install pyinstaller`).
+Prerequisites: dependencies from `requirements.txt` and `pyinstaller`.
 
-Versioning:
-- Bump `__version__` in `version.py` before each release build.
-- The GUI window title and output EXE filename both include that version.
-
-Build command (from repo root):
+Bump `__version__` in `version.py`, then from the repo root:
 
 ```bash
 python build_exe.py
 ```
 
-Equivalent direct PyInstaller command:
-
-```bash
-python -m PyInstaller --noconfirm "ICMS Snapshot ETL.spec"
-```
-
-Output:
-- executable at `dist/ICMS Snapshot ETL v<version>.exe` (example: `dist/ICMS Snapshot ETL v1.0.0.exe`)
-- build artifacts in `build/` and the checked-in `ICMS Snapshot ETL.spec` file.
+Output: `dist/ICMS Snapshot ETL v<version>.exe` (one-file, windowed, built from `ICMS Snapshot ETL.spec`).

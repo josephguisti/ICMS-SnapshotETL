@@ -13,6 +13,11 @@ icms_snapshot_history.csv
 icms_client_project_master.xlsx
 icms_ingest_log.csv
 icms_duplicate_client_project_warning.csv
+icms_exit_log_history.csv
+icms_services_log_history.csv
+icms_output_format.txt
+backups/
+.pytest_cache/
 
 # Local runtime state (persists per-machine; should not be shared via git)
 settings.json
