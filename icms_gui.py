@@ -1072,6 +1072,22 @@ class ICMSApp(tk.Tk):
             else:
                 reprocessing = True
 
+        while True:
+            locked = core.check_outputs_writable(output_dir)
+            if not locked:
+                break
+            names = "\n".join(
+                f"  • {p.name if p.suffix else p}" for p in locked
+            )
+            retry = messagebox.askretrycancel(
+                "Output files in use",
+                "Cannot write to one or more output files. Close them in Excel "
+                "or another program, then click Retry.\n\n"
+                f"{names}",
+            )
+            if not retry:
+                return
+
         self._current_output_dir = output_dir
         self._progress["value"] = 0
         self._step_lbl.config(text="Starting…")

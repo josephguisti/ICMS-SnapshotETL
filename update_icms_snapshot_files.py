@@ -265,6 +265,11 @@ def main() -> None:
                 print("Aborted by user.")
                 return
 
+    locked = core.check_outputs_writable(output_dir)
+    if locked:
+        print("ERROR: " + core.format_output_lock_message(locked))
+        sys.exit(1)
+
     results = core.run_snapshot_files(
         specs, output_dir,
         password=password,

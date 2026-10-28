@@ -44,15 +44,16 @@ Analysts never edit mappings, and there is no local alias file.
 ## 3. Run path
 
 `run_snapshot_files(files, output_dir, ...)`:
-1. Sorts files oldest first, then backs up outputs if reprocessing or upgrading the format (`backup_outputs`, `output_format_is_current`).
-2. Calls `process_snapshot_file` for each file. That function:
+1. Probes existing outputs for write access (`check_outputs_writable` / `ensure_outputs_writable`) so a file open in Excel fails before any snapshot is processed. The GUI offers Retry/Cancel; the CLI prints the locked names and exits.
+2. Sorts files oldest first, then backs up outputs if reprocessing or upgrading the format (`backup_outputs`, `output_format_is_current`).
+3. Calls `process_snapshot_file` for each file. That function:
    - opens the workbook (`open_workbook`) and reads `Generated On` (`read_generated_on`);
    - picks tabs (`resolve_sheets`) and reads each through the catalogue (`read_category`);
    - validates essential fields and builds the participant frame (`build_participant_frame`);
    - writes everything inside `_OutputTransaction`, which restores every output if any write fails. The writers are `update_snapshot_history`, `update_exit_log_history`, `update_services_log_history`, the master rebuild (single file only), the dashboard (single file only), `append_duplicate_warning`, and `append_ingest_log`.
-3. Rebuilds the master once for a batch (`rebuild_client_project_master` → `_build_master_from_histories`).
-4. Publishes the newest successful file for a batch, if allowed.
-5. Groups findings (`group_findings`, `format_findings_text`) and returns one result dict that the GUI and CLI display.
+4. Rebuilds the master once for a batch (`rebuild_client_project_master` → `_build_master_from_histories`).
+5. Publishes the newest successful file for a batch, if allowed.
+6. Groups findings (`group_findings`, `format_findings_text`) and returns one result dict that the GUI and CLI display.
 
 Snapshot-date defaults for the Setup panel come from `default_snapshot_date(path, password)`. The GUI's already-imported check is `already_imported(specs, output_dir)`.
 

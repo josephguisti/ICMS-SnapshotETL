@@ -1292,6 +1292,79 @@ def append_duplicate_warning(
 
 # ── Backups and per-file transactions ─────────────────────────────────────────
 
+class OutputLockedError(RuntimeError):
+    """Raised when an output file or folder cannot be written before a run."""
+
+    def __init__(self, locked: Sequence[Path]):
+        self.locked = [Path(p) for p in locked]
+        super().__init__(format_output_lock_message(self.locked))
+
+
+def format_output_lock_message(locked: Sequence[Path]) -> str:
+    """User-facing explanation for locked or unwritable outputs."""
+    # Prefer short names for files; keep the folder path when the dir itself failed.
+    display: List[str] = []
+    for p in locked:
+        path = Path(p)
+        display.append(path.name if path.suffix else str(path))
+    listed = "\n".join(f"  - {n}" for n in display)
+    return (
+        "Cannot write to one or more output files.\n\n"
+        f"{listed}\n\n"
+        "Close these files in Excel or another program, wait for OneDrive sync "
+        "to finish, then try again."
+    )
+
+
+def _probe_path_writable(path: Path) -> bool:
+    """Return True if ``path`` can be opened for update (Excel locks fail here)."""
+    try:
+        with open(path, "r+b"):
+            pass
+        return True
+    except PermissionError:
+        return False
+    except OSError as exc:
+        # WinError 32: file in use; errno 13: EACCES
+        if getattr(exc, "winerror", None) == 32 or getattr(exc, "errno", None) in (13, 11):
+            return False
+        raise
+
+
+def check_outputs_writable(output_dir: Path) -> List[Path]:
+    """Probe existing outputs and the output folder for write access.
+
+    Returns locked/unwritable paths (empty list if everything is writable).
+    Does not create missing output files. The output directory itself is
+    included in the result when a write probe there fails.
+    """
+    output_dir = Path(output_dir)
+    locked: List[Path] = []
+
+    probe = output_dir / ".icms_write_probe"
+    try:
+        with open(probe, "wb") as fh:
+            fh.write(b"0")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        probe.unlink(missing_ok=True)
+        locked.append(output_dir)
+        return locked
+
+    for name in OUTPUT_FILENAMES:
+        path = output_dir / name
+        if path.exists() and not _probe_path_writable(path):
+            locked.append(path)
+    return locked
+
+
+def ensure_outputs_writable(output_dir: Path) -> None:
+    """Raise ``OutputLockedError`` if any existing output cannot be written."""
+    locked = check_outputs_writable(output_dir)
+    if locked:
+        raise OutputLockedError(locked)
+
+
 def existing_outputs(output_dir: Path) -> List[Path]:
     return [output_dir / n for n in OUTPUT_FILENAMES if (output_dir / n).exists()]
 
@@ -1719,6 +1792,7 @@ def run_snapshot_files(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_outputs_writable(output_dir)
     ordered = sorted(files, key=lambda f: (f.snapshot_date, Path(f.path).name))
     is_batch = len(ordered) > 1
     prior_latest = latest_history_snapshot_date(output_dir)

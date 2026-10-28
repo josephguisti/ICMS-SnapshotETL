@@ -1,4 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""One-file GUI build. Excludes unused optional stacks that PyInstaller would
+otherwise follow (~80 MB of Apache Arrow alone). Do not exclude pandas.*
+submodules that pandas imports at package load time (e.g. pandas.plotting)."""
 
 import sys
 
@@ -8,8 +11,60 @@ from version import __version__
 
 APP_NAME = f"ICMS Snapshot ETL v{__version__}"
 
+# Safe excludes: optional third-party stacks and test tooling the app never
+# imports. Keep cryptography (msoffcrypto) and Tcl/Tk (the GUI).
+EXCLUDES = [
+    "pyarrow",
+    "pytest",
+    "_pytest",
+    "py",
+    "pygments",
+    "pluggy",
+    "iniconfig",
+    "matplotlib",
+    "scipy",
+    "PIL",
+    "Pillow",
+    "IPython",
+    "jupyter",
+    "notebook",
+    "sphinx",
+    "numba",
+    "numexpr",
+    "sklearn",
+    "skimage",
+    "statsmodels",
+    "tables",
+    "h5py",
+    "lxml",
+    "bs4",
+    "html5lib",
+    "sqlalchemy",
+    "fastparquet",
+    "fsspec",
+    "s3fs",
+    "botocore",
+    "boto3",
+    "zstandard",
+    "lz4",
+    "pandas.tests",
+    "numpy.tests",
+    "numpy.f2py",
+    "numpy.distutils",
+    "numpy.doc",
+    "tkinter.test",
+    "lib2to3",
+    "ensurepip",
+    "idlelib",
+    "turtledemo",
+    "turtle",
+    "setuptools",
+    "pkg_resources",
+    "distutils",
+]
+
 a = Analysis(
-    ['icms_gui.py'],
+    ["icms_gui.py"],
     pathex=[],
     binaries=[],
     datas=[],
@@ -17,7 +72,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=EXCLUDES,
     noarchive=False,
     optimize=0,
 )
