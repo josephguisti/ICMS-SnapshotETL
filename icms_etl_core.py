@@ -124,7 +124,7 @@ OUTPUT_FILENAMES: List[str] = [
 ]
 
 # Bump when stored outputs change shape; triggers a one-time automatic backup.
-OUTPUT_FORMAT_VERSION = "2: enrollment-level master, catalogue mappings"
+OUTPUT_FORMAT_VERSION = "3: enrollment master includes gender and race"
 
 DEFAULT_SHEET_NAMES: Dict[str, str] = {
     cat: spec.names[0] for cat, spec in catalogue.SHEETS.items()

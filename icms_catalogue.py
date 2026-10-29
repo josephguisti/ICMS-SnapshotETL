@@ -147,6 +147,10 @@ PARTICIPANT_FIELDS: List[FieldSpec] = [
     # Older vintages capitalize "for"; case-insensitive matching covers it.
     F("In-Person Encounters Recorded For This Month"),
     F("Unsuccessful Outreach Attempts Recorded For This Month"),
+    # Approved 2026-10-28 for the enrollment master. The other demographic
+    # columns on this sheet stay in KNOWN_EXCLUDED_HEADERS.
+    F("Gender Identity"),
+    F("Race and Ethnicity"),
 ]
 
 # ── Exit Log ─────────────────────────────────────────────────────────────────
@@ -263,8 +267,6 @@ KNOWN_EXCLUDED_HEADERS: Dict[str, Tuple[str, ...]] = {
         "Citizenship Status",
         "U.S. Veteran?",
         "Primary Language",
-        "Gender Identity",
-        "Race and Ethnicity",
         "Address",
         "Main Income Source (Amount)",
         "Housing Subsidy Application Date",
