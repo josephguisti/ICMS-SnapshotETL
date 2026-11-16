@@ -200,6 +200,8 @@ VACANT_FIELDS: List[FieldSpec] = [
 SERVICES_FIELDS: List[FieldSpec] = [
     F("Row ID", report_missing=False),
     F("CHAMP ID", essential=True),
+    # Not on the Service Log; filled from the same snapshot's participant/exit rows.
+    F("ICMS Project Name", report_missing=False),
     F("DHS Master Agreement #", sources=("HSH Master Agreement #",), report_missing=False),
     F("ICMS Work Order #", report_missing=False),
     F("ICMS Provider Name", sources=("ICMS Provider",)),

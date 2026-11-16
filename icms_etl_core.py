@@ -124,7 +124,7 @@ OUTPUT_FILENAMES: List[str] = [
 ]
 
 # Bump when stored outputs change shape; triggers a one-time automatic backup.
-OUTPUT_FORMAT_VERSION = "3: enrollment master includes gender and race"
+OUTPUT_FORMAT_VERSION = "4: services history includes ICMS Project Name"
 
 DEFAULT_SHEET_NAMES: Dict[str, str] = {
     cat: spec.names[0] for cat, spec in catalogue.SHEETS.items()
@@ -807,6 +807,46 @@ def build_participant_frame(
         keep &= out[k].map(_safe_str).ne("")
     dropped = int((~keep).sum())
     return out.loc[keep].reset_index(drop=True), dropped
+
+
+def _unique_project_by_enrollment(df: pd.DataFrame) -> Dict[Tuple[str, str], str]:
+    """Map (CHAMP ID, enrollment ID) to its project when exactly one is named."""
+    if df is None or df.empty:
+        return {}
+    work = pd.DataFrame({
+        "champ": _norm_id_series(df["CHAMP ID"]),
+        "enrollment": _norm_id_series(df["ICMS Enrollment ID"]),
+        "project": df["ICMS Project Name"].map(_safe_str),
+    })
+    work = work[work["champ"].ne("") & work["enrollment"].ne("") & work["project"].ne("")]
+    names = work.drop_duplicates().groupby(["champ", "enrollment"])["project"]
+    counts = names.nunique()
+    single = names.first()[counts == 1]
+    return {k: v for k, v in single.items()}
+
+
+def fill_services_project_name(
+    services_df: pd.DataFrame,
+    participant_df: pd.DataFrame,
+    exit_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fill blank service ``ICMS Project Name`` from the same snapshot.
+
+    Matched on CHAMP ID + ICMS Enrollment ID: the participant row first, then
+    the Exit Log. Pairs that are missing or name more than one project stay blank.
+    """
+    if services_df is None or services_df.empty:
+        return services_df
+    out = services_df.copy()
+    if "ICMS Project Name" not in out.columns:
+        out["ICMS Project Name"] = None
+    lookup = _unique_project_by_enrollment(exit_df)
+    lookup.update(_unique_project_by_enrollment(participant_df))
+    keys = list(zip(_norm_id_series(out["CHAMP ID"]), _norm_id_series(out["ICMS Enrollment ID"])))
+    filled = pd.Series([lookup.get(k) for k in keys], index=out.index, dtype=object)
+    blank = out["ICMS Project Name"].map(_safe_str).eq("")
+    out.loc[blank, "ICMS Project Name"] = filled[blank]
+    return out
 
 
 def build_vacant_slot_rows(
@@ -1603,6 +1643,7 @@ def process_snapshot_file(
         services_df = frames["services"]
         if not services_df.empty:
             services_df = services_df[services_df["CHAMP ID"].map(_safe_str).ne("")]
+            services_df = fill_services_project_name(services_df, df, exit_df)
         vacant_rows = build_vacant_slot_rows(frames["vacant"], snapshot_date, source_file_name)
 
         log(f"Participant rows: {len(df)}")

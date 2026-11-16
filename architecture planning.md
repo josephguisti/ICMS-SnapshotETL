@@ -105,6 +105,7 @@ Field names and column order for every output come from `icms_catalogue.py`. Met
 - If a fallback row has a blank `Service`, it borrows the single non-blank `Service` seen for the same remaining components. This lets damaged rows (written when the vendor renamed the column) merge with their repaired copies instead of duplicating.
 - Reprocessing a file first removes rows previously stored from that file + date. Then per event key, each column takes the earliest snapshot's non-blank value. A corrected reimport therefore replaces its own old values, and a blank never hides a value another snapshot supplied.
 - Blank `PH Building Name` is stored as `Scattered Site`.
+- The Service Log has no project column. `ICMS Project Name` is taken from the same snapshot's participant row with that `CHAMP ID` + `ICMS Enrollment ID`, or from its Exit Log row when the participant tab has none. It stays blank when the enrollment is not found or names more than one project.
 
 ### `icms_client_project_master.xlsx`
 **Grain:** one row per **`CHAMP ID` + `ICMS Project Name` + `ICMS Enrollment ID`**. The filename is unchanged.
