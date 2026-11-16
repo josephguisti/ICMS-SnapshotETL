@@ -36,5 +36,6 @@ The executable is written to `dist/ICMS Snapshot ETL v<version>.exe`.
 
 Historical records:
 
+- [CHANGELOG.md](CHANGELOG.md) lists what changed in each version, in plain English.
 - [docs/2026-10-21 Snapshot Drift Review.md](docs/2026-10-21%20Snapshot%20Drift%20Review.md) records the vendor drift that the 2026-10-27 update (v1.1.0) addressed.
 - `CONFIG_EXTRACTION_PLAN.md` and `ODR_ETL_PORT_PLAN.md` are plans, not descriptions of the running app.

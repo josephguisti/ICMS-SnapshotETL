@@ -16,7 +16,7 @@ When a run's Results panel lists **structural findings**, the analyst copies the
    - If renamed, handle it as above.
    - If intentionally gone, set `retired=True`. For a field that never appears on that tab, set `report_missing=False`.
 3. **Supported tab not found / Unfamiliar tab** — add the new tab name to `SHEETS` in `icms_catalogue.py`, or to `KNOWN_EXCLUDED_SHEETS` if it is not a data source.
-4. Run `python -m pytest tests -p no:cacheprovider`, bump `version.py`, run `python build_exe.py`, and give the analyst the new EXE.
+4. Run `python -m pytest tests -p no:cacheprovider`, bump `version.py`, add a plain-English entry to `CHANGELOG.md`, run `python build_exe.py`, and give the analyst the new EXE.
 5. If the analyst needs the affected snapshots corrected, have them select those files and choose **Reprocess all selected**. Outputs are backed up automatically.
 
 Analysts never edit mappings, and there is no local alias file.
