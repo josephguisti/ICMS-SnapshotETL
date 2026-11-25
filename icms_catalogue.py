@@ -217,6 +217,8 @@ SERVICES_FIELDS: List[FieldSpec] = [
       sources=("CHAMP User Who Created Service Record",)),
     F("Organization of CHAMP User Who Created Record",
       sources=("Organization of CHAMP User Who Created Service Record",)),
+    # Not on the Service Log; filled from the same snapshot's participant/exit rows.
+    F("Client Name", report_missing=False),
 ]
 
 FIELDS_BY_CATEGORY: Dict[str, List[FieldSpec]] = {

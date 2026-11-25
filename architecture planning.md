@@ -106,6 +106,7 @@ Field names and column order for every output come from `icms_catalogue.py`. Met
 - Reprocessing a file first removes rows previously stored from that file + date. Then per event key, each column takes the earliest snapshot's non-blank value. A corrected reimport therefore replaces its own old values, and a blank never hides a value another snapshot supplied.
 - Blank `PH Building Name` is stored as `Scattered Site`.
 - The Service Log has no project column. `ICMS Project Name` is taken from the same snapshot's participant row with that `CHAMP ID` + `ICMS Enrollment ID`, or from its Exit Log row when the participant tab has none. It stays blank when the enrollment is not found or names more than one project.
+- The Service Log also has no client name. `Client Name` is taken the same way from `First Name` + `Last Name`, formatted as `First Last`. Missing components become `[BLANK FIRST]` or `[BLANK LAST]`. An unambiguous participant name wins; when the participant row has no name (both components blank) or the enrollment is absent from the participant tab, an unambiguous Exit Log name is used. Conflicting participant names stay blank and do not fall through to exit. Unmatched enrollments stay blank. Older history rows without a name stay blank until that service event appears again or its source snapshot is reprocessed; the first non-blank value then fills the column without adding a second event.
 
 ### `icms_client_project_master.xlsx`
 **Grain:** one row per **`CHAMP ID` + `ICMS Project Name` + `ICMS Enrollment ID`**. The filename is unchanged.

@@ -124,7 +124,7 @@ OUTPUT_FILENAMES: List[str] = [
 ]
 
 # Bump when stored outputs change shape; triggers a one-time automatic backup.
-OUTPUT_FORMAT_VERSION = "4: services history includes ICMS Project Name"
+OUTPUT_FORMAT_VERSION = "5: services history includes Client Name"
 
 DEFAULT_SHEET_NAMES: Dict[str, str] = {
     cat: spec.names[0] for cat, spec in catalogue.SHEETS.items()
@@ -825,6 +825,55 @@ def _unique_project_by_enrollment(df: pd.DataFrame) -> Dict[Tuple[str, str], str
     return {k: v for k, v in single.items()}
 
 
+_BLANK_FIRST = "[BLANK FIRST]"
+_BLANK_LAST = "[BLANK LAST]"
+_BLANK_CLIENT_NAME = f"{_BLANK_FIRST} {_BLANK_LAST}"
+
+
+def format_client_name(first_name, last_name) -> str:
+    """Join first/last as ``First Last``, marking whichever component is blank."""
+    first = _safe_str(first_name) or _BLANK_FIRST
+    last = _safe_str(last_name) or _BLANK_LAST
+    return f"{first} {last}"
+
+
+def _client_name_lookup_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return champ/enrollment/client_name rows for name resolution."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["champ", "enrollment", "client_name"])
+    if "First Name" not in df.columns or "Last Name" not in df.columns:
+        return pd.DataFrame(columns=["champ", "enrollment", "client_name"])
+    work = pd.DataFrame({
+        "champ": _norm_id_series(df["CHAMP ID"]),
+        "enrollment": _norm_id_series(df["ICMS Enrollment ID"]),
+        "client_name": [
+            format_client_name(f, l)
+            for f, l in zip(df["First Name"], df["Last Name"])
+        ],
+    })
+    return work[work["champ"].ne("") & work["enrollment"].ne("")].reset_index(drop=True)
+
+
+def _unique_client_name_by_enrollment(df: pd.DataFrame) -> Dict[Tuple[str, str], str]:
+    """Map (CHAMP ID, enrollment ID) to its client name when exactly one is named."""
+    work = _client_name_lookup_frame(df)
+    if work.empty:
+        return {}
+    names = work.drop_duplicates().groupby(["champ", "enrollment"])["client_name"]
+    counts = names.nunique()
+    single = names.first()[counts == 1]
+    return {k: v for k, v in single.items()}
+
+
+def _ambiguous_client_name_keys(df: pd.DataFrame) -> set:
+    """(CHAMP ID, enrollment ID) pairs that name more than one client."""
+    work = _client_name_lookup_frame(df)
+    if work.empty:
+        return set()
+    counts = work.drop_duplicates().groupby(["champ", "enrollment"])["client_name"].nunique()
+    return set(counts[counts > 1].index)
+
+
 def fill_services_project_name(
     services_df: pd.DataFrame,
     participant_df: pd.DataFrame,
@@ -846,6 +895,51 @@ def fill_services_project_name(
     filled = pd.Series([lookup.get(k) for k in keys], index=out.index, dtype=object)
     blank = out["ICMS Project Name"].map(_safe_str).eq("")
     out.loc[blank, "ICMS Project Name"] = filled[blank]
+    return out
+
+
+def fill_services_client_name(
+    services_df: pd.DataFrame,
+    participant_df: pd.DataFrame,
+    exit_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fill blank service ``Client Name`` from the same snapshot.
+
+    Matched on CHAMP ID + ICMS Enrollment ID. An unambiguous participant name
+    wins. When the participant row has no name (both components blank), or the
+    enrollment is absent from the participant tab, an unambiguous Exit Log name
+    is used. Conflicting participant names stay blank and do not fall through
+    to exit. Missing first/last components become ``[BLANK FIRST]`` /
+    ``[BLANK LAST]``. Unmatched enrollments stay blank.
+    """
+    if services_df is None or services_df.empty:
+        return services_df
+    out = services_df.copy()
+    if "Client Name" not in out.columns:
+        out["Client Name"] = None
+    part = _unique_client_name_by_enrollment(participant_df)
+    exit_names = _unique_client_name_by_enrollment(exit_df)
+    ambiguous = _ambiguous_client_name_keys(participant_df)
+    keys = list(zip(_norm_id_series(out["CHAMP ID"]), _norm_id_series(out["ICMS Enrollment ID"])))
+    filled = []
+    for key in keys:
+        if key in ambiguous:
+            filled.append(None)
+            continue
+        part_name = part.get(key)
+        if part_name is not None and part_name != _BLANK_CLIENT_NAME:
+            filled.append(part_name)
+            continue
+        exit_name = exit_names.get(key)
+        if exit_name is not None:
+            filled.append(exit_name)
+        elif part_name is not None:
+            filled.append(part_name)
+        else:
+            filled.append(None)
+    filled_s = pd.Series(filled, index=out.index, dtype=object)
+    blank = out["Client Name"].map(_safe_str).eq("")
+    out.loc[blank, "Client Name"] = filled_s[blank]
     return out
 
 
@@ -1114,6 +1208,17 @@ def update_services_log_history(
     existing = _read_history_csv(path, "services log history")
     if services_df is None or services_df.empty:
         metrics["services_log_history_total_rows"] = len(existing)
+        # Rewrite an existing file into the current catalogue column order so a
+        # format upgrade still lands the new schema when this run has no services.
+        if not existing.empty:
+            rewritten = _sort_history(
+                _order_columns(_stringify_frame(existing), METADATA_FIELDS + SERVICES_LOG_FIELDS)
+            )
+            try:
+                rewritten.to_csv(path, index=False, encoding="utf-8")
+            except Exception as exc:
+                raise RuntimeError(f"Could not write services log history: {exc}") from exc
+            metrics["services_log_history_total_rows"] = int(len(rewritten))
         return metrics
 
     incoming = _with_metadata(
@@ -1644,6 +1749,7 @@ def process_snapshot_file(
         if not services_df.empty:
             services_df = services_df[services_df["CHAMP ID"].map(_safe_str).ne("")]
             services_df = fill_services_project_name(services_df, df, exit_df)
+            services_df = fill_services_client_name(services_df, df, exit_df)
         vacant_rows = build_vacant_slot_rows(frames["vacant"], snapshot_date, source_file_name)
 
         log(f"Participant rows: {len(df)}")

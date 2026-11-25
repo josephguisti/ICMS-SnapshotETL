@@ -6,6 +6,12 @@ When a new version is released, add an entry at the top.
 
 ---
 
+## Version 1.1.4 — November 24, 2026
+
+- **The services history now includes a client name.** The Service Log tab does not include first or last names. The app fills `Client Name` from the same snapshot's participant row for that CHAMP ID and enrollment ID, or from the Exit Log when the participant row has no name. Names are written as `First Last`. If either part is missing, the blank part is marked as `[BLANK FIRST]` or `[BLANK LAST]`. If the enrollment can't be found, or the participant list has conflicting names, the field is left blank rather than guessed.
+- Services already saved by earlier versions keep a blank client name until a later snapshot includes the same service, or the older snapshot files are reprocessed.
+- The first run with this version saves a backup copy of the existing output files before writing anything.
+
 ## Version 1.1.3 — November 16, 2026
 
 - **The services history now shows which project each service belongs to.** The vendor's Service Log tab does not include a project name. The app now looks up each service's client and enrollment in the same snapshot's participant list, or its Exit Log, and fills in the project from there. If the enrollment can't be found, or it is listed under more than one project, the project is left blank rather than guessed.

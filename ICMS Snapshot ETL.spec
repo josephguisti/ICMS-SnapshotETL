@@ -13,6 +13,8 @@ APP_NAME = f"ICMS Snapshot ETL v{__version__}"
 
 # Safe excludes: optional third-party stacks and test tooling the app never
 # imports. Keep cryptography (msoffcrypto) and Tcl/Tk (the GUI).
+# Keep distutils available: PyInstaller's keyring hook aliases its
+# setuptools-vendored copy during analysis (including on Python 3.14).
 EXCLUDES = [
     "pyarrow",
     "pytest",
@@ -60,7 +62,6 @@ EXCLUDES = [
     "turtle",
     "setuptools",
     "pkg_resources",
-    "distutils",
 ]
 
 a = Analysis(
